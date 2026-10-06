@@ -1,0 +1,55 @@
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+
+# next.js
+/.next/
+/out/
+next-env.d.ts
+
+# production
+/build
+/dist
+
+# misc
+.DS_Store
+*.pem
+Thumbs.db
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files - never commit real secrets
+.env
+.env*.local
+.env.production
+.env.development
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+
+# testing
+/coverage
+/.vitest
+
+# local dev database (SQLite dev/sandbox adapter only)
+/.data
+*.sqlite
+*.sqlite3
+*.db
+
+# generated PWA icons (regenerate with `npm run icons`)
+/public/icons/generated
+
+# logs
+/logs
+
+# Local scratch space for debugging scripts.
+.tmp/
