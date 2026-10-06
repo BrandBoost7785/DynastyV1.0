@@ -22,7 +22,7 @@ import { SqliteStore } from '../src/persistence/sqlite-store';
 import { resetStoreInit, useStoreDriver } from '../src/persistence';
 import { resetRateLimits } from '../src/server/services/rate-limit';
 import { getWorldRegistry } from '../src/engine/registry';
-import { findForbiddenKeys } from '../src/server/dto';
+import { SERVER_ONLY_REPORT_FIELDS, findForbiddenKeys } from '../src/server/dto';
 import type { GameStateDto } from '../src/server/dto';
 import type { SaveMetadata, SaveVersionRow } from '../src/persistence/types';
 
@@ -544,7 +544,7 @@ describe('command pipeline', () => {
     expect(tooLong.status).toBe(400);
     expect(tooLong.body.error?.message).toContain('30');
 
-    const ok = await invoke<{ state: GameStateDto; meta: SaveMetadata; data?: unknown }>(advancePost as unknown as RouteHandler, `/api/games/${game.gameId}/advance`, {
+    const ok = await invoke<{ state: GameStateDto; meta: SaveMetadata; data?: unknown; dataTruncated?: boolean }>(advancePost as unknown as RouteHandler, `/api/games/${game.gameId}/advance`, {
       method: 'POST',
       cookie: user.cookie,
       params: { gameId: game.gameId },
@@ -556,7 +556,39 @@ describe('command pipeline', () => {
     expect(ok.body.data?.meta.version).toBe(game.state.meta.version + 1);
     // The day report is present, and the ops-only timing field is not.
     expect(findForbiddenKeys(ok.body.data)).toEqual([]);
-    // The server's own tick timing is ops information, not game state.
+    // The server's own tick timing is ops information, not game state: it is declared
+    // server-only in SERVER_ONLY_REPORT_FIELDS and omitted from the public contract.
+    // The report is *whole* — no truncation marker — which is what makes the missing
+    // field a deliberate omission rather than a trimmed payload.
+    expect(JSON.stringify(ok.body.data)).not.toContain('"elapsedMs"');
+    const report = ok.body.data?.data as { days?: number; reports?: unknown[] } | undefined;
+    expect(report?.days).toBe(3);
+    expect(report?.reports).toHaveLength(3);
+    expect(ok.body.data?.dataTruncated).toBeUndefined();
+    expect(SERVER_ONLY_REPORT_FIELDS).toEqual(['elapsedMs']);
+  });
+
+  it('advances a single day with a full report and no server-only timing field', async () => {
+    const user = await newUser();
+    const game = await newGame(user);
+
+    const ok = await invoke<{ state: GameStateDto; meta: SaveMetadata; data?: unknown; dataTruncated?: boolean }>(
+      advancePost as unknown as RouteHandler,
+      `/api/games/${game.gameId}/advance`,
+      {
+        method: 'POST',
+        cookie: user.cookie,
+        params: { gameId: game.gameId },
+        body: { days: 1, expectedVersion: game.state.meta.version, requestId: 'one-day' },
+      },
+    );
+    expect(ok.status).toBe(200);
+    expectNoRedaction(ok.response, 'advance one day');
+    expect(ok.body.data?.dataTruncated).toBeUndefined();
+    const report = ok.body.data?.data as { day?: number; phases?: unknown[]; netWorthChange?: number } | undefined;
+    expect(report?.day).toBe(game.state.world.day + 1);
+    expect(Array.isArray(report?.phases)).toBe(true);
+    expect(typeof report?.netWorthChange).toBe('number');
     expect(JSON.stringify(ok.body.data)).not.toContain('"elapsedMs"');
   });
 

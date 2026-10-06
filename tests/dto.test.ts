@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DTO_LIMITS,
+  SERVER_ONLY_REPORT_FIELDS,
   actionDataDto,
   actionResultDto,
   dayReportDto,
@@ -21,6 +22,7 @@ import {
   publicTransaction,
   sanitiseForClient,
 } from '../src/server/dto';
+import type { DayReportDto, MultiDayReportDto } from '../src/server/dto';
 import { createNewGame } from '../src/sim/bootstrap';
 import { advanceDay, advanceDays, rngForDay } from '../src/sim/tick';
 import { creditCash } from '../src/sim/state';
@@ -29,6 +31,20 @@ import type { GameState, TransactionRecord } from '../src/sim/types';
 function fresh(seed = 'dto-seed', userId = 'dto-user'): GameState {
   return createNewGame({ userId, playerName: 'Boundary', seed }).state;
 }
+
+/** Every key that appears anywhere in a value, dotted by path. */
+function keyPaths(value: unknown, path = '$', depth = 0): string[] {
+  if (depth > 24 || value === null || typeof value !== 'object') return [];
+  if (Array.isArray(value)) return value.flatMap((entry, i) => keyPaths(entry, `${path}[${i}]`, depth + 1));
+  return Object.entries(value as Record<string, unknown>).flatMap(([key, entry]) => [`${path}.${key}`, ...keyPaths(entry, `${path}.${key}`, depth + 1)]);
+}
+
+/**
+ * Compile-time guard: if `elapsedMs` is ever put back into the public type, this
+ * resolves to `never` and the assignment below stops compiling — which `npm run
+ * verify` runs before the tests.
+ */
+type PublicDayReportHasNoTiming = 'elapsedMs' extends keyof DayReportDto ? never : true;
 
 describe('state projection', () => {
   it('drops every internal system from the player-facing save', () => {
@@ -169,6 +185,78 @@ describe('action envelope', () => {
     const converted = actionDataDto(huge);
     expect(converted.truncated).toBe(true);
     expect(converted.data).toEqual({ truncated: true });
+  });
+});
+
+describe('day report server-only fields', () => {
+  it('declares the omission in one place instead of dropping the field silently', () => {
+    expect(SERVER_ONLY_REPORT_FIELDS).toEqual(['elapsedMs']);
+    // Type-level half of the rule: the public report type cannot carry the field.
+    const guard: PublicDayReportHasNoTiming = true;
+    expect(guard).toBe(true);
+  });
+
+  it('keeps the engine report intact — the timing field is server-only, not truncated', () => {
+    const state = fresh('dto-elapsed-domain');
+    const single = advanceDay(state, rngForDay(state, 1));
+    const multi = advanceDays(state, rngForDay(state, 2), 3);
+
+    // The authoritative report still measures the tick: nothing is lost, and the
+    // server keeps the operations number it logs into diagnostics.
+    expect(Number.isFinite(single.elapsedMs)).toBe(true);
+    expect(single.elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(Number.isInteger(single.elapsedMs)).toBe(true);
+    expect(Number.isFinite(multi.elapsedMs)).toBe(true);
+    expect(multi.elapsedMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('drops exactly the declared field from a public report and nothing else', () => {
+    const state = fresh('dto-elapsed-exactly');
+    const report = advanceDay(state, rngForDay(state, 1));
+    const dto = dayReportDto(report);
+
+    const declared: readonly string[] = SERVER_ONLY_REPORT_FIELDS;
+    const expected = Object.keys(report)
+      .filter((key) => !declared.includes(key))
+      .sort();
+    // Nothing but the declaration is missing: absence of elapsedMs is a decision about
+    // the contract, not a truncated day report.
+    expect(Object.keys(dto).sort()).toEqual(expected);
+    expect(expected).toContain('phases');
+    expect(expected).toContain('netWorth');
+    expect(expected.length).toBe(Object.keys(report).length - declared.length);
+  });
+
+  it('never carries a timing field into a transport payload, single or multi day', () => {
+    const state = fresh('dto-elapsed-transport');
+    const single = actionDataDto(advanceDay(state, rngForDay(state, 1)));
+    expect(single.truncated).toBe(false);
+    expect(keyPaths(single.data).filter((path) => /elapsed|millis|duration|\.ms$/.test(path))).toEqual([]);
+
+    const multi = actionDataDto(advanceDays(state, rngForDay(state, 2), 3));
+    expect(multi.truncated).toBe(false);
+    expect(keyPaths(multi.data).filter((path) => /elapsed|millis|duration|\.ms$/.test(path))).toEqual([]);
+    // The per-day reports inside the batch are projected the same way.
+    const reports = (multi.data as MultiDayReportDto).reports;
+    expect(reports.length).toBeGreaterThan(0);
+    for (const day of reports) expect(day).not.toHaveProperty('elapsedMs');
+  });
+
+  it('returns a complete, untruncated report for a realistic 30-day advance', () => {
+    const state = fresh('dto-elapsed-thirty');
+    const converted = actionDataDto(advanceDays(state, rngForDay(state, 3), 30));
+    expect(converted.truncated).toBe(false);
+
+    const dto = converted.data as MultiDayReportDto;
+    // The report is whole — which is what proves the missing timing field is omitted by
+    // contract rather than trimmed by a size limit.
+    expect(dto.days).toBe(dto.reports.length);
+    expect(dto.days).toBeGreaterThan(0);
+    expect(JSON.stringify(dto)).not.toContain('"elapsedMs"');
+    for (const day of dto.reports) {
+      expect(day.phases.length).toBeGreaterThan(0);
+      expect(Number.isFinite(day.netWorth.total)).toBe(true);
+    }
   });
 });
 

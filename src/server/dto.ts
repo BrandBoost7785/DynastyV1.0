@@ -14,7 +14,8 @@
  *
  *   • `gameStateDto`  → a curated player-facing projection of the save
  *   • `actionResultDto` → the action envelope with `state` removed and `data`
- *     converted (day reports lose `elapsedMs`, anything huge is capped)
+ *     converted (day reports drop the declared `SERVER_ONLY_REPORT_FIELDS`,
+ *     anything huge is capped)
  *   • `sanitiseForClient` → a final defensive pass applied by the HTTP layer to
  *     *every* success body, which strips a fixed list of internal key names
  *     wherever they appear and caps payload size
@@ -168,12 +169,35 @@ export interface GameStateDto {
 }
 
 /**
- * A day report as the client sees it. `elapsedMs` is dropped: it is the server's own
- * wall-clock cost for the tick, which is operations information rather than game state.
+ * The day-report fields that exist for the server's benefit only.
+ *
+ * `DayReport.elapsedMs` is the wall-clock cost of one tick (`Date.now() - started` in
+ * `advanceDay`). It is operations telemetry, not game state: no rule reads it, the
+ * player cannot act on it, it moves with server load rather than with anything in the
+ * empire, and publishing it would tell a client how busy the host is. It is recorded
+ * where it belongs — `state.diagnostics` via `pushDiagnostic` in `src/sim/tick.ts` —
+ * and `diagnostics` is on the forbidden-key list, so it never reaches a browser from
+ * there either.
+ *
+ * The value is intact server-side: it is **not** truncated, clipped or rounded on the
+ * way out, and it is **not** lost from the engine report. It is simply not part of the
+ * public contract, and this constant is the single declaration of that decision —
+ * both the public types below and the runtime projection are derived from it, so a new
+ * server-only field is dropped by adding one entry here and nowhere else.
+ *
+ * `tests/dto.test.ts` pins the two halves of the rule: the engine report still carries
+ * a finite `elapsedMs` (diagnostics keep working), and a public report differs from the
+ * engine report by exactly this list (nothing else is ever dropped silently). A client
+ * that wants to time its own work measures with its own clock.
  */
-export type DayReportDto = Omit<DayReport, 'elapsedMs'>;
+export const SERVER_ONLY_REPORT_FIELDS = ['elapsedMs'] as const;
 
-export interface MultiDayReportDto extends Omit<MultiDayReport, 'elapsedMs' | 'reports'> {
+export type ServerOnlyReportField = (typeof SERVER_ONLY_REPORT_FIELDS)[number];
+
+/** A day report as the client sees it: the engine report minus the server-only fields. */
+export type DayReportDto = Omit<DayReport, ServerOnlyReportField>;
+
+export interface MultiDayReportDto extends Omit<MultiDayReport, ServerOnlyReportField | 'reports'> {
   reports: DayReportDto[];
 }
 
@@ -322,6 +346,20 @@ export function gameStateDto(state: GameState): GameStateDto {
 }
 
 /**
+ * Drop the declared server-only fields from an engine report.
+ *
+ * Driven by `SERVER_ONLY_REPORT_FIELDS` rather than a hand-written destructure, so the
+ * public type and the wire payload cannot drift: adding a field to the list changes
+ * both at once. Returns a shallow copy — `stripInternalKeys` deep-copies what it
+ * receives, so the authoritative report object is never mutated.
+ */
+function withoutServerOnlyReportFields<T extends object>(report: T): Omit<T, ServerOnlyReportField> {
+  const copy = { ...report } as Record<string, unknown>;
+  for (const field of SERVER_ONLY_REPORT_FIELDS) delete copy[field];
+  return copy as Omit<T, ServerOnlyReportField>;
+}
+
+/**
  * Strip the ops-only timing fields from a day report.
  *
  * The report is a deep structure with event results inside it, and those carry the
@@ -332,14 +370,18 @@ export function gameStateDto(state: GameState): GameStateDto {
  * defined. The safety net then has nothing left to catch.
  */
 export function dayReportDto(report: DayReport): DayReportDto {
-  const { elapsedMs: _elapsedMs, ...rest } = report;
+  const rest = withoutServerOnlyReportFields(report);
   const cleaned = stripInternalKeys({ ...rest, news: tail(rest.news, DTO_LIMITS.reportNews) });
   return cleaned.value;
 }
 
 export function multiDayReportDto(report: MultiDayReport): MultiDayReportDto {
-  const { elapsedMs: _elapsedMs, reports, ...rest } = report;
-  const cleaned = stripInternalKeys({ ...rest, reports: reports.map(dayReportDto) });
+  // `reports` is spread back in last, and the server-only fields are removed before the
+  // spread, so the public payload keeps the exact key order this endpoint has always
+  // sent. Responses stay byte-comparable between deploys (receipts, logs, any future
+  // signature), for a projection that does not care about key order either way.
+  const { reports, ...rest } = report;
+  const cleaned = stripInternalKeys({ ...withoutServerOnlyReportFields(rest), reports: reports.map(dayReportDto) });
   return cleaned.value;
 }
 

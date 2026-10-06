@@ -119,6 +119,12 @@ CLIENT → AUTH → API ROUTES → APPLICATION SERVICES → AUTHORITATIVE INTENT
 
 `error.code` reuses the simulation's own `GameErrorCode` vocabulary; transport failures add `not_authenticated`, `validation_failed`, `rate_limited`, `payload_too_large` and `service_unavailable`. Rate limits publish `ratelimit-limit`, `ratelimit-remaining`, `ratelimit-reset` and `retry-after`.
 
+#### Server-only report fields
+
+Day reports (the payload of `POST /api/games/:id/advance` and of `time.advance_day` / `time.advance_days` intents) follow one explicit omission rule. `DayReport.elapsedMs` — the wall-clock cost of the tick — is the server's own operations telemetry: no game rule reads it, it moves with server load rather than with the empire, and publishing it would disclose host performance. It is recorded in `state.diagnostics` (itself on the forbidden-key list) and is **not** part of the public contract.
+
+The omission is declared once, in `SERVER_ONLY_REPORT_FIELDS` (`src/server/dto.ts`), which derives both the `DayReportDto` type and the runtime projection, so the public type and the wire payload cannot drift. It is not truncation: the value stays intact server-side, and a day report is delivered whole — `tests/api.test.ts` asserts a real advance returns every day of the batch with no `dataTruncated` marker, while `tests/dto.test.ts` asserts that a public report differs from the engine report by exactly that declaration. A client that wants to time its own work measures with its own clock.
+
 ### Client
 
 `src/lib/api-client.ts` is the only way browser code talks to the server: relative URLs (so it works unchanged behind a proxy or in production), `credentials: 'include'`, automatic envelope unwrapping with a typed `ApiError`, and `expectedVersion` + idempotency key on every command.
