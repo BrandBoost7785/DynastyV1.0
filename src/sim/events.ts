@@ -42,6 +42,7 @@ import {
   round2,
 } from './state';
 import { addShock, pushNews } from './world';
+import { orderedEntries, orderedKeys } from './ordering';
 import type {
   ActiveEvent,
   CommodityCategory,
@@ -125,15 +126,34 @@ function expireEvents(state: GameState, result: EventTickResult): void {
   const day = state.world.day;
   const keep: ActiveEvent[] = [];
   for (const event of state.world.activeEvents) {
-    if (event.expiresDay !== null && event.expiresDay <= day) {
+    /*
+     * A null expiry is a legacy document written before instantaneous events
+     * expired: it is only still running if it started today. Treating it as expired
+     * sweeps old saves back to a bounded list on the first tick, with no schema bump.
+     */
+    if (event.expiresDay === null ? event.startedDay < day : event.expiresDay <= day) {
       result.expired.push(event.defId);
       continue;
     }
     keep.push(event);
   }
+  if (keep.length > B.events.maxActiveEvents) {
+    // Keep everything genuinely in force, then the newest of the rest, so the list
+    // the player sees is the most recent truth rather than an arbitrary slice.
+    const ranked = [...keep].sort((a, b) => b.startedDay - a.startedDay);
+    const trimmed = ranked.slice(0, B.events.maxActiveEvents);
+    pushDiagnostic(state, {
+      system: 'events',
+      level: 'warn',
+      message: `Trimmed ${keep.length - trimmed.length} active event record(s) to stay within the ${B.events.maxActiveEvents}-event budget`,
+      data: { before: keep.length, after: trimmed.length },
+    });
+    keep.length = 0;
+    keep.push(...trimmed);
+  }
   state.world.activeEvents = keep;
   // Shocks expire in world.stepWorld/trim; event cooldowns expire with the day.
-  for (const [defId, until] of Object.entries(state.world.eventCooldowns)) {
+  for (const [defId, until] of orderedEntries(state.world.eventCooldowns)) {
     if (until <= day) delete state.world.eventCooldowns[defId];
   }
 }
@@ -189,7 +209,16 @@ export function fireEvent(state: GameState, rng: Rng, def: EventDef, opts: FireO
     scope: def.scope,
     severity: def.severity,
     startedDay: day,
-    expiresDay: duration !== null ? day + duration : null,
+    /*
+     * An event with no declared duration is *not* ongoing: it happens, its effects
+     * land, and it belongs in the news feed rather than in the list of things
+     * currently in force. It used to be stored with a null expiry, which meant it
+     * was never removed — after 400 days a world carried 51 "active" events, eight
+     * of them the same hijacking, one of them 383 days old, all of them rendered to
+     * the player as if they were happening now. An instantaneous event now expires
+     * at the end of its own day.
+     */
+    expiresDay: day + (duration ?? 0),
     locationIds,
     regionIds,
     appliedEffects: [],
@@ -343,7 +372,8 @@ function publishEvent(state: GameState, def: EventDef, event: ActiveEvent, repor
     pushNotification(state, {
       kind: importance >= 4 ? 'danger' : importance === 3 ? 'warning' : 'info',
       title: fill(def.name, epicentre, def.scope),
-      body: `${reports.map((r) => r.summary).join(' ')}${event.expiresDay !== null ? ` Expected to last until day ${event.expiresDay}.` : ''}`,
+      // Only promise a duration when the event actually runs past its own day.
+      body: `${reports.map((r) => r.summary).join(' ')}${(event.expiresDay ?? event.startedDay) > event.startedDay ? ` Expected to last until day ${event.expiresDay}.` : ''}`,
       link: '/game/news',
       metrics: reports.flatMap((r) => r.metrics).slice(0, 6),
     });
@@ -571,7 +601,7 @@ export function applyEffect(ctx: EffectContext, effect: EventEffect): EffectRepo
     case 'faction_relation': {
       const faction = state.world.factions[effect.factionId];
       if (!faction) return report(effect.kind, 'Faction unknown.', [], null);
-      for (const [otherId, value] of Object.entries(faction.relations)) {
+      for (const [otherId, value] of orderedEntries(faction.relations)) {
         faction.relations[otherId] = round2(clamp(value + effect.delta, -100, 100));
       }
       return report(effect.kind, `${faction.factionId} relations moved ${effect.delta >= 0 ? '+' : ''}${effect.delta}.`, [{ label: 'Delta', value: String(effect.delta) }], null);
@@ -1089,7 +1119,7 @@ export function eventsView(state: GameState): {
   retentionDays: number;
 } {
   const categories = new Map<string, number>();
-  for (const [key, value] of Object.entries(state.player.stats.counters)) {
+  for (const [key, value] of orderedEntries(state.player.stats.counters)) {
     if (!key.startsWith('events:')) continue;
     categories.set(key.slice(7), value);
   }
@@ -1106,7 +1136,7 @@ export function eventsView(state: GameState): {
         chainDepth: s.chainDepth,
       }))
       .sort((a, b) => a.day - b.day),
-    cooldowns: Object.entries(state.world.eventCooldowns).map(([defId, untilDay]) => ({ defId, name: EVENT_BY_ID[defId]?.name ?? defId, untilDay })),
+    cooldowns: orderedEntries(state.world.eventCooldowns).map(([defId, untilDay]) => ({ defId, name: EVENT_BY_ID[defId]?.name ?? defId, untilDay })),
     firedByCategory: [...categories.entries()].map(([category, count]) => ({ category, count })).sort((a, b) => b.count - a.count),
     shocks: state.world.shocks.map((s) => ({
       id: s.id,
@@ -1114,7 +1144,7 @@ export function eventsView(state: GameState): {
       scope: s.scope,
       severity: s.severity,
       expiresDay: s.expiresDay,
-      categories: [...new Set([...Object.keys(s.demandModifiers), ...Object.keys(s.supplyModifiers), ...Object.keys(s.priceModifiers)])],
+      categories: [...new Set([...orderedKeys(s.demandModifiers), ...orderedKeys(s.supplyModifiers), ...orderedKeys(s.priceModifiers)])],
     })),
     totalFired: counter(state, 'events_fired'),
     retentionDays: B.events.newsRetentionDays,

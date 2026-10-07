@@ -32,6 +32,7 @@ import {
   round2,
 } from './state';
 import type { GameState, ID, ProductionLineInstance, ProductionRecipeDef, ProductionReport } from './types';
+import { orderedEntries } from './ordering';
 
 const B = getBalance();
 const worldReg = getWorldRegistry();
@@ -365,7 +366,7 @@ export function decommissionLine(state: GameState, lineId: ID): ProductionAction
 function returnInputs(state: GameState, lineId: ID): void {
   const line = state.player.productionLines.find((l) => l.id === lineId);
   if (!line) return;
-  for (const [commodityId, qty] of Object.entries(line.inputs)) {
+  for (const [commodityId, qty] of orderedEntries(line.inputs)) {
     if (qty <= 0) continue;
     addItem(state, { commodityId, qty: Math.floor(qty), avgCost: baseValue(commodityId), origin: 'purchased' });
     line.inputs[commodityId] = 0;
@@ -468,7 +469,7 @@ export function collectOutputs(state: GameState, lineId: ID, includeByproducts =
   const line = state.player.productionLines.find((l) => l.id === lineId);
   if (!line) return { ok: false, reason: 'No such production line.' };
   const collected: { commodityId: ID; qty: number }[] = [];
-  for (const [commodityId, qty] of Object.entries(line.outputs)) {
+  for (const [commodityId, qty] of orderedEntries(line.outputs)) {
     const whole = Math.floor(qty);
     if (whole <= 0) continue;
     const recipe = RECIPE_BY_ID[line.recipeId];
@@ -1024,11 +1025,11 @@ export function bufferSummary(state: GameState): { inputs: number; outputs: numb
   let outputs = 0;
   let value = 0;
   for (const line of state.player.productionLines) {
-    for (const [id, qty] of Object.entries(line.inputs)) {
+    for (const [id, qty] of orderedEntries(line.inputs)) {
       inputs += qty;
       value += qty * baseValue(id);
     }
-    for (const [id, qty] of Object.entries(line.outputs)) {
+    for (const [id, qty] of orderedEntries(line.outputs)) {
       outputs += qty;
       value += qty * baseValue(id);
     }

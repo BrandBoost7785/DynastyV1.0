@@ -27,6 +27,7 @@ import { bumpCounter, counter, grantXp, playerModifiers } from './progression';
 import { addHeat, changeReputation } from './reputation';
 import { creditCash, debitCash, formatMoney, pushDiagnostic, pushNotification, round2 } from './state';
 import type { ActiveCombat, CommodityDef, GameState, ID, TravelMode, TravelState, VehicleInstance } from './types';
+import { materialiseLocation } from './markets';
 
 const B = getBalance();
 const worldReg = getWorldRegistry();
@@ -1027,6 +1028,19 @@ function arrive(
   setCounterSafe(state, 'distance_travelled', counter(state, 'distance_travelled') + plan.distanceKm);
   state.player.stats.daysSurvived += daysElapsed;
   recordObjective(state, 'travel_to', { locationId: dest, qty: 1, days: daysElapsed });
+
+  /*
+   * Price the city you just walked into.
+   *
+   * Markets are materialised lazily, and the starting city (plus its neighbours) is
+   * priced at bootstrap — but arrival at a *new* city used to price nothing, so the
+   * market screen after a journey showed a roster of goods at ¤0.00 that the rows
+   * still described as tradable. The prices were not missing because the goods
+   * could not be traded; they were missing because nobody had asked the location to
+   * open a book yet. Arrival is the state transition where that becomes true, so it
+   * happens here, once, rather than being recomputed by every reader.
+   */
+  materialiseLocation(state, dest, { includeHidden: state.player.underground.accessUnlocked });
 
   pushNotification(state, {
     kind: 'success',

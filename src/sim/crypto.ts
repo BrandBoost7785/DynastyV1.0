@@ -75,7 +75,9 @@ function priceFloor(def: CryptoAssetDef): number {
 
 export function initCryptoAssets(world: WorldState, rng: Rng, day = 0): number {
   let created = 0;
-  for (const def of CRYPTO_ASSETS) {
+  // Ascending id order, for the same reason as the equity seed: iteration order is
+  // observable to a seeded RNG, and the save format stores keys sorted.
+  for (const def of [...CRYPTO_ASSETS].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
     if (world.cryptoAssets[def.id]) continue;
     const seed = cryptoSeedFor(def.id);
     const sentiment = round2(clamp(0.35 + def.networkEffect * 0.4 + rng.float(-0.08, 0.12), 0.03, 0.97));

@@ -18,6 +18,7 @@ import { heatReduction } from './modifiers';
 import { playerModifiers } from './progression';
 import { pushNotification, round2 } from './state';
 import type { GameState, ID, ReputationDimension, ReputationState } from './types';
+import { orderedEntries } from './ordering';
 
 const B = getBalance();
 
@@ -229,12 +230,12 @@ export function reputationTick(state: GameState, rng: Rng): ReputationTickResult
     const next = Math.abs(value) <= drift ? 0 : value - Math.sign(value) * drift;
     rep.dimensions[dim] = round2(next);
   }
-  for (const [key, value] of Object.entries(rep.regional)) {
+  for (const [key, value] of orderedEntries(rep.regional)) {
     if (value === 0) continue;
     const next = Math.abs(value) <= B.reputation.decayPerDayTowardZero ? 0 : value - Math.sign(value) * B.reputation.decayPerDayTowardZero;
     rep.regional[key] = round2(next);
   }
-  for (const [key, value] of Object.entries(rep.local)) {
+  for (const [key, value] of orderedEntries(rep.local)) {
     if (value === 0) continue;
     const next = Math.abs(value) <= B.reputation.decayPerDayTowardZero * 1.4 ? 0 : value - Math.sign(value) * B.reputation.decayPerDayTowardZero * 1.4;
     rep.local[key] = round2(next);
@@ -333,10 +334,10 @@ export function reputationSummary(state: GameState): ReputationSummary {
     traceHeat: state.player.underground.traceHeat,
     overall,
     recentChanges: rep.recentChanges.slice(-24).reverse(),
-    regional: Object.entries(rep.regional)
+    regional: orderedEntries(rep.regional)
       .filter(([, v]) => v !== 0)
       .map(([regionId, value]) => ({ regionId, value })),
-    local: Object.entries(rep.local)
+    local: orderedEntries(rep.local)
       .filter(([, v]) => v !== 0)
       .map(([locationId, value]) => ({ locationId, value })),
   };

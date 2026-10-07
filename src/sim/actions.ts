@@ -124,6 +124,7 @@ import { moveItem, setConcealed } from './inventory';
 import { createRule, deleteRule, ruleConfigSchema, updateRule } from './automation';
 import { transferCash } from './state';
 import { parseIntent, type ActionIntent } from './validation';
+import { orderedKeys } from './ordering';
 import type {
   ActionWarning,
   ActionResult,
@@ -486,7 +487,7 @@ export function sanitiseRuleConfig(
       out[field.key] = value;
     }
   }
-  for (const key of Object.keys(config ?? {})) {
+  for (const key of orderedKeys(config ?? {})) {
     if (!schema.some((f) => f.key === key)) rejected.push(`${key} is not a setting for this rule`);
   }
   return { config: out, rejected };

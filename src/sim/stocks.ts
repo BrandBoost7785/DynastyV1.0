@@ -67,7 +67,10 @@ function roundPrice(v: number): number {
 /** Populate `world.companies` from the registry with seeded opening prices. */
 export function initCompanies(world: WorldState, rng: Rng, day = 0): number {
   let created = 0;
-  for (const def of COMPANIES) {
+  // Ascending id order: see `orderedRecord` in world.ts — the save format sorts
+  // object keys, so a record built in this order iterates identically live and
+  // after a reload.
+  for (const def of [...COMPANIES].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))) {
     if (world.companies[def.id]) continue;
     const price = roundPrice(def.marketCap / Math.max(1, def.sharesOutstanding));
     const eps = round4((def.revenueAnnual * def.margin) / Math.max(1, def.sharesOutstanding));

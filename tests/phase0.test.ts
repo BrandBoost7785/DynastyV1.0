@@ -300,9 +300,12 @@ describe('travel/shipment planning contract', () => {
 
     buyVehicle(state, rngForDay(state, 1), 'panel_van');
     const registry = getCommodityRegistry();
+    // Small, light *and* storable in the van: cold-chain, secure, hazardous and
+    // climate-controlled goods need facilities a panel van does not provide, and the
+    // purchase would (correctly) be refused for capacity rather than for the plan.
     const row = marketRows(state, state.player.locationId, { onlyTradable: true }).find((r) => {
       const c = registry.get(r.commodityId);
-      return c && r.ask > 0 && c.weightKg < 3 && c.volumeL < 10;
+      return c && r.ask > 0 && c.weightKg < 3 && c.volumeL < 10 && c.storage === 'none';
     })!;
     const buy = dispatch(state, rngForAction(state, 'shipment-buy'), { type: 'trade.buy', commodityId: row.commodityId, qty: 2 }, { userId: state.userId });
     expect(buy.ok).toBe(true);

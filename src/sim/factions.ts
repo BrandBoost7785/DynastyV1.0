@@ -34,6 +34,7 @@ import {
 } from './state';
 import { pushNews } from './world';
 import type { FactionDef, FactionOffer, FactionState, GameState, ID } from './types';
+import { orderedEntries } from './ordering';
 
 const B = getBalance();
 const worldReg = getWorldRegistry();
@@ -50,9 +51,17 @@ function clamp(v: number, lo: number, hi: number): number {
  */
 const MAX_CONCURRENT_WARS = 5;
 
-function countWars(state: GameState): number {
+/**
+ * Count the wars currently in progress, once per tick.
+ *
+ * `factionTick` asks this question inside its per-faction × per-relation loop, so
+ * counting from scratch each time meant re-scanning and re-sorting the whole
+ * faction table thousands of times a day. The caller now keeps a running total
+ * that it adjusts as wars start and end.
+ */
+function countWars(factions: FactionState[]): number {
   let total = 0;
-  for (const faction of Object.values(state.world.factions)) {
+  for (const faction of factions) {
     for (const enemyId of faction.atWarWith) {
       if (faction.factionId < enemyId) total += 1;
     }
@@ -132,8 +141,10 @@ export function factionTick(state: GameState, rng: Rng): FactionTickResult {
   // and the news feed is nothing but crises.
   let warsToday = 0;
   let offersToday = 0;
+  const factions = Object.values(state.world.factions);
+  let warsInProgress = countWars(factions);
 
-  for (const faction of Object.values(state.world.factions)) {
+  for (const faction of factions) {
     const def = FACTION_BY_ID[faction.factionId];
     if (!def) continue;
 
@@ -144,7 +155,7 @@ export function factionTick(state: GameState, rng: Rng): FactionTickResult {
     faction.mood = round2(clamp(faction.mood + rng.gaussian(0, 0.012) + (state.world.globalSentiment - 0.5) * 0.01, 0, 1));
 
     /* ------------------------------- relations ------------------------------ */
-    for (const [otherId, value] of Object.entries(faction.relations)) {
+    for (const [otherId, value] of orderedEntries(faction.relations)) {
       const other = state.world.factions[otherId];
       if (!other) continue;
       const otherDef = FACTION_BY_ID[otherId];
@@ -164,14 +175,16 @@ export function factionTick(state: GameState, rng: Rng): FactionTickResult {
       if (Math.abs(next - value) > 0.01) result.relationShifts += 1;
 
       /* ------------------------------ war & peace ---------------------------- */
-      const warBudget = warsToday === 0 && countWars(state) < MAX_CONCURRENT_WARS;
+      const warBudget = warsToday === 0 && warsInProgress < MAX_CONCURRENT_WARS;
       if (!atWar && warBudget && next <= B.factions.warDeclarationThreshold && faction.power > other.power * 0.85 && rng.chance(0.02)) {
         declareWar(state, faction, other, `Relations fell to ${next.toFixed(0)} and ${def.name} decided it could win.`);
+        warsInProgress += 1;
         result.warsDeclared.push({ factionId: faction.factionId, enemyId: otherId });
         result.newsGenerated += 1;
         warsToday += 1;
       } else if (atWar && (next > -35 || faction.power < other.power * 0.5) && rng.chance(0.08)) {
         makePeace(state, faction, other, next > -35 ? 'Both sides ran out of appetite for the fight.' : `${def.name} could no longer sustain the war.`);
+        warsInProgress = Math.max(0, warsInProgress - 1);
         result.peaceMade.push({ factionId: faction.factionId, enemyId: otherId });
         result.newsGenerated += 1;
       }
@@ -250,10 +263,10 @@ export function factionTick(state: GameState, rng: Rng): FactionTickResult {
  * engine (`faction_war` effect) so authored events can escalate the world.
  */
 export function provokeWar(state: GameState, rng: Rng): { factionId: ID; enemyId: ID } | null {
-  if (countWars(state) >= MAX_CONCURRENT_WARS) return null;
+  if (countWars(Object.values(state.world.factions)) >= MAX_CONCURRENT_WARS) return null;
   const candidates: { faction: FactionState; enemy: FactionState; score: number }[] = [];
   for (const faction of Object.values(state.world.factions)) {
-    for (const [enemyId, relation] of Object.entries(faction.relations)) {
+    for (const [enemyId, relation] of orderedEntries(faction.relations)) {
       const enemy = state.world.factions[enemyId];
       if (!enemy || faction.atWarWith.includes(enemyId)) continue;
       if (relation > -42) continue;
@@ -770,7 +783,7 @@ export function factionViews(state: GameState): FactionView[] {
       territory: faction.controlledLocationIds.map((id) => ({ id, name: worldReg.location(id)?.name ?? id, here: id === state.player.locationId })),
       atWarWith: faction.atWarWith.map((id) => ({ id, name: FACTION_BY_ID[id]?.name ?? id })),
       alliedWith: faction.alliedWith.map((id) => ({ id, name: FACTION_BY_ID[id]?.name ?? id })),
-      relations: Object.entries(faction.relations)
+      relations: orderedEntries(faction.relations)
         .map(([id, value]) => ({ id, name: FACTION_BY_ID[id]?.name ?? id, value: round2(value) }))
         .sort((a, b) => a.value - b.value)
         .slice(0, 8),

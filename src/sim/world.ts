@@ -13,7 +13,7 @@ import { getBalance } from '../config/balance';
 import { getWorldRegistry } from '../engine/registry/world';
 import { getCommodityRegistry } from '../engine/registry/commodities';
 import { COUNTRIES, REGIONS } from '../engine/registry/regions';
-import { FACTIONS } from '../engine/registry/actors';
+import { FACTIONS, FACTION_BY_ID } from '../engine/registry/actors';
 import type {
   ActiveShock,
   CommodityCategory,
@@ -21,6 +21,7 @@ import type {
   DiagnosticEntry,
   EconomicIndicators,
   EventScope,
+  FactionState,
   GovernmentState,
   ID,
   LocationState,
@@ -28,8 +29,25 @@ import type {
   Severity,
   WorldState,
 } from './types';
+import { orderedEntries } from './ordering';
 
 const B = getBalance();
+
+/**
+ * Build a record whose keys are inserted in ascending order.
+ *
+ * The simulation must not care what order a record's keys happen to be in, and it
+ * mostly does not — but where it does (a seeded RNG drawn per entry, a float total
+ * accumulated per entry), the order has to be *the same* for a live world and for
+ * the same world reloaded from a save, whose canonical JSON has sorted keys. These
+ * records are written once, at world creation, so imposing the order here costs
+ * nothing and removes the need to re-sort them on every tick.
+ */
+function orderedRecord<T>(entries: [ID, T][]): Record<ID, T> {
+  const out: Record<ID, T> = {};
+  for (const [key, value] of [...entries].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))) out[key] = value;
+  return out;
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
@@ -49,9 +67,8 @@ export function createWorldState(seed: string, startDay = 0): WorldState {
   const worldReg = getWorldRegistry();
   const rng = new Rng(`${seed}:world`, 'world-gen');
 
-  const locations: Record<ID, LocationState> = {};
-  for (const l of worldReg.locations) {
-    locations[l.id] = {
+  const locations: Record<ID, LocationState> = orderedRecord(
+    worldReg.locations.map((l): [ID, LocationState] => [l.id, {
       locationId: l.id,
       discovered: !l.hidden,
       stability: round(clamp(0.35 + l.security * 0.5 + rng.float(-0.1, 0.1), 0.02, 1), 3),
@@ -67,22 +84,21 @@ export function createWorldState(seed: string, startDay = 0): WorldState {
       disasterUntilDay: null,
       demandShift: {},
       lastVisitedDay: null,
-    };
-  }
+    }]),
+  );
 
-  const routes: Record<ID, RouteState> = {};
-  for (const r of worldReg.routes) {
-    routes[r.id] = {
+  const routes: Record<ID, RouteState> = orderedRecord(
+    worldReg.routes.map((r): [ID, RouteState] => [r.id, {
       routeId: r.id,
       disrupted: false,
       disruptedUntilDay: null,
       disruptionReason: null,
       risk: round(r.baseRisk, 3),
       costMultiplier: 1,
-    };
-  }
+    }]),
+  );
 
-  const factions: WorldState['factions'] = {};
+  const factionEntries: [ID, WorldState['factions'][ID]][] = [];
   for (const f of FACTIONS) {
     const relations: Record<ID, number> = {};
     for (const other of FACTIONS) {
@@ -94,7 +110,7 @@ export function createWorldState(seed: string, startDay = 0): WorldState {
       if (f.kind === other.kind && f.territoryIds.some((t) => other.territoryIds.includes(t))) rel -= 18;
       relations[other.id] = round(clamp(rel, -100, 100), 1);
     }
-    factions[f.id] = {
+    factionEntries.push([f.id, {
       factionId: f.id,
       resources: f.resources,
       power: f.power,
@@ -107,12 +123,13 @@ export function createWorldState(seed: string, startDay = 0): WorldState {
       mood: round(rng.float(0.4, 0.65), 3),
       lastActionDay: startDay,
       pendingOffers: [],
-    };
+    }]);
   }
+  const factions: WorldState['factions'] = orderedRecord(factionEntries);
 
-  const governments: Record<ID, GovernmentState> = {};
+  const governmentEntries: [ID, GovernmentState][] = [];
   for (const c of COUNTRIES) {
-    governments[c.id] = {
+    governmentEntries.push([c.id, {
       countryId: c.id,
       stability: round(clamp(c.governance * 0.8 + rng.float(0, 0.25), 0.05, 1), 3),
       crackdownIntensity: round(clamp((1 - c.tolerance) * 0.8 + rng.float(0, 0.2), 0.05, 1), 3),
@@ -121,8 +138,9 @@ export function createWorldState(seed: string, startDay = 0): WorldState {
       sanctionsTargetIds: [],
       policy: c.development > 0.8 ? 'open' : c.development > 0.5 ? 'protectionist' : 'austerity',
       electionInDays: rng.chance(0.4) ? rng.int(120, 900) : null,
-    };
+    }]);
   }
+  const governments: Record<ID, GovernmentState> = orderedRecord(governmentEntries);
 
   const competitors = createCompetitors(rng, startDay);
 
@@ -176,7 +194,7 @@ function createCompetitors(rng: Rng, startDay: number): Record<ID, CompetitorSta
   const worldReg = getWorldRegistry();
   const registry = getCommodityRegistry();
   const categories = registry.categories();
-  const out: Record<ID, CompetitorState> = {};
+  const out: [ID, CompetitorState][] = [];
   const names = [
     'Halden Freight', 'Vasquez Hermanos', 'Northwind Trading', 'Kessel Mercantile',
     'Blue Harbor Logistics', 'Sable Ridge Commodities', 'Meridian Cargo', 'Tessier et Fils',
@@ -191,7 +209,7 @@ function createCompetitors(rng: Rng, startDay: number): Record<ID, CompetitorSta
     const operating = [home.id];
     const neighbours = worldReg.neighboursOf(home.id).slice(0, rng.int(1, 3));
     for (const n of neighbours) operating.push(n.other.id);
-    out[id] = {
+    out.push([id, {
       id,
       name: names[i % names.length] ?? `Competitor ${i + 1}`,
       kind: rng.pick(['trader', 'syndicate', 'corporation', 'logistics'] as const),
@@ -203,9 +221,9 @@ function createCompetitors(rng: Rng, startDay: number): Record<ID, CompetitorSta
       reputation: round(rng.float(-20, 60), 1),
       lastActionDay: startDay,
       hostileToPlayer: false,
-    };
+    }]);
   }
-  return out;
+  return orderedRecord(out);
 }
 
 /** Sinusoidal business cycle → demand/price multiplier. */
@@ -321,10 +339,19 @@ export function stepWorld(world: WorldState, rng: Rng, day: number): WorldStepRe
     const enforcement = def?.laws.enforcement ?? 0.5;
     const gov = world.governments[def?.countryId ?? ''];
     const crackdown = gov?.crackdownIntensity ?? 0.4;
-    loc.patrolIntensity = round(clamp(enforcement * (0.5 + crackdown * 0.6) + loc.playerHeat * 0.004, 0.01, 1.6), 3);
+    /*
+     * Who runs the place decides how hard it is policed. Taking territory used to
+     * adjust `patrolIntensity` for exactly one day — this recomputation overwrote it
+     * the next morning — so a city seized by a criminal syndicate was patrolled just
+     * like one run by a bank. The owner's kind is now part of the daily figure.
+     */
+    const owner = loc.controllingFactionId ? world.factions[loc.controllingFactionId] : undefined;
+    const ownerKind = owner ? FACTION_BY_ID[owner.factionId]?.kind : undefined;
+    const ownerFactor = ownerKind === 'government' ? 1.15 : ownerKind === 'criminal_syndicate' ? 0.75 : ownerKind === 'bank' ? 1.05 : 1;
+    loc.patrolIntensity = round(clamp(enforcement * (0.5 + crackdown * 0.6) * ownerFactor + loc.playerHeat * 0.004, 0.01, 1.6), 3);
 
     // Demand shifts decay back to neutral.
-    for (const [cat, mul] of Object.entries(loc.demandShift)) {
+    for (const [cat, mul] of orderedEntries(loc.demandShift)) {
       const next = 1 + (mul - 1) * 0.94;
       if (Math.abs(next - 1) < 0.01) delete loc.demandShift[cat as keyof typeof loc.demandShift];
       else (loc.demandShift as Record<string, number>)[cat] = round(next, 4);
@@ -333,6 +360,13 @@ export function stepWorld(world: WorldState, rng: Rng, day: number): WorldStepRe
 
   /* ------------------------------ routes ---------------------------- */
   const worldReg = getWorldRegistry();
+  /*
+   * Canonical order, computed once per day rather than inside the loops below.
+   * `factionWarRiskOnRoute` runs for every route and every market day; sorting the
+   * faction table each time it was called cost more than the rest of the world step
+   * put together, which is why the ordering lives out here.
+   */
+  const factions = Object.values(world.factions);
   for (const rs of Object.values(world.routes)) {
     if (rs.disrupted && rs.disruptedUntilDay !== null && day >= rs.disruptedUntilDay) {
       rs.disrupted = false;
@@ -347,7 +381,7 @@ export function stepWorld(world: WorldState, rng: Rng, day: number): WorldStepRe
     const toState = world.locations[def.to];
     const borderBlocked = (fromState?.borderClosed || toState?.borderClosed) ?? false;
     const baseRisk = def.baseRisk * (1 + (fromState ? (1 - fromState.stability) * 0.5 : 0) + (toState ? (1 - toState.stability) * 0.5 : 0));
-    const factionWarRisk = factionWarRiskOnRoute(world, def.from, def.to);
+    const factionWarRisk = factionWarRiskOnRoute(world, factions, def.from, def.to);
     rs.risk = round(clamp(baseRisk + factionWarRisk + (borderBlocked ? 0.25 : 0) + (rs.disrupted ? 0.12 : 0), 0.005, 0.99), 4);
     if (!rs.disrupted && rng.chance(B.travel.routeDisruptionChancePerDay)) {
       const duration = rng.int(...B.travel.routeDisruptionDurationDays);
@@ -412,7 +446,7 @@ export function stepWorld(world: WorldState, rng: Rng, day: number): WorldStepRe
 function decayShock(s: ActiveShock, decay: number): void {
   const shrink = (v: number) => round(1 + (v - 1) * (1 - decay), 4);
   const decayMap = (map: Partial<Record<CommodityCategory, number>>): void => {
-    for (const [key, value] of Object.entries(map) as [CommodityCategory, number | undefined][]) {
+    for (const [key, value] of orderedEntries(map) as [CommodityCategory, number | undefined][]) {
       if (value === undefined) continue;
       map[key] = shrink(value);
     }
@@ -429,12 +463,12 @@ function pickDisruptionReason(rng: Rng, border: boolean): string {
   return rng.pick(reasons);
 }
 
-function factionWarRiskOnRoute(world: WorldState, from: ID, to: ID): number {
+function factionWarRiskOnRoute(world: WorldState, factions: FactionState[], from: ID, to: ID): number {
   const a = world.locations[from];
   const b = world.locations[to];
   if (!a || !b) return 0;
   let risk = 0;
-  for (const f of Object.values(world.factions)) {
+  for (const f of factions) {
     if (f.atWarWith.length === 0) continue;
     const controlsA = f.controlledLocationIds.includes(from);
     const controlsB = f.controlledLocationIds.includes(to);

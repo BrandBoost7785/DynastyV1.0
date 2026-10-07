@@ -55,6 +55,7 @@ import {
 } from './state';
 import { pushNews, stepWorld, type WorldStepResult } from './world';
 import type { ActiveShock, DiagnosticEntry, GameState, NewsItem, PlayerNotification } from './types';
+import { orderedEntries } from './ordering';
 
 const B = getBalance();
 const worldReg = getWorldRegistry();
@@ -1101,7 +1102,7 @@ function trimBuffers(state: GameState): void {
   }
   // Expire finished shocks and stale event cooldowns so long saves stay lean.
   state.world.shocks = state.world.shocks.filter((s) => s.expiresDay === null || s.expiresDay > state.world.day);
-  for (const [key, until] of Object.entries(state.world.eventCooldowns)) {
+  for (const [key, until] of orderedEntries(state.world.eventCooldowns)) {
     if (until <= state.world.day) delete state.world.eventCooldowns[key];
   }
 }

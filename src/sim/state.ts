@@ -48,6 +48,7 @@ import type {
   UndergroundState,
   VictoryCondition,
 } from './types';
+import { orderedEntries, orderedKeys } from './ordering';
 
 const B = getBalance();
 
@@ -488,6 +489,31 @@ export function createStartingInventory(
     // A single unit has to fit inside the reserved budget, or there is no legal
     // starter position for this commodity at all.
     .filter((c) => c.weightKg <= kgBudget && c.volumeL <= litreBudget)
+    /*
+     * …and the container that carries it has to be *allowed* to carry it.
+     *
+     * Weight and volume are not the only constraints a stack is checked against:
+     * cold-chain, secure, hazardous and climate-controlled goods each need a facility
+     * the starter kit does not have. Handing a new player a crate of frozen shrimp
+     * they cannot legally store — and therefore cannot buy more of, and cannot sell
+     * without first buying a refrigerated unit — is a trap at the door. Anything the
+     * personal storage cannot hold is simply not a candidate for the starting
+     * position.
+     */
+    .filter((c) => {
+      switch (c.storage) {
+        case 'refrigerated':
+          return storage.refrigerated;
+        case 'secure':
+          return storage.security >= 0.5;
+        case 'hazardous':
+          return storage.kind !== 'personal';
+        case 'climate':
+          return storage.refrigerated || storage.kind !== 'personal';
+        default:
+          return true;
+      }
+    })
     .sort((a, b) => b.baseDemand - a.baseDemand);
 
   if (candidates.length === 0) return [];
@@ -1332,11 +1358,11 @@ export function computeNetWorth(state: GameState): NetWorthBreakdown {
 
   const productionLines = round2(
     player.productionLines.reduce((sum, l) => {
-      const buffered = Object.entries(l.outputs).reduce((acc, [id, qty]) => {
+      const buffered = orderedEntries(l.outputs).reduce((acc, [id, qty]) => {
         const quote = priceAt(state, l.locationId, id);
         return acc + (quote ? quote.price * qty : 0);
       }, 0);
-      const inputs = Object.entries(l.inputs).reduce((acc, [id, qty]) => {
+      const inputs = orderedEntries(l.inputs).reduce((acc, [id, qty]) => {
         const quote = priceAt(state, l.locationId, id);
         return acc + (quote ? quote.price * qty : 0);
       }, 0);
@@ -1555,7 +1581,7 @@ export function validateState(state: GameState): ValidationIssue[] {
     if (holding.staked > holding.amount + 1e-9) err(`cryptoHoldings.${holding.assetId}.staked`, 'staked exceeds holdings');
   }
 
-  for (const key of Object.keys(state.markets)) {
+  for (const key of orderedKeys(state.markets)) {
     const market = state.markets[key]!;
     if (!Number.isFinite(market.price) || market.price <= 0) err(`markets.${key}.price`, `invalid price ${market.price}`);
     if (market.supply < 0) err(`markets.${key}.supply`, 'negative supply');
@@ -1568,7 +1594,7 @@ export function validateState(state: GameState): ValidationIssue[] {
     }
   }
 
-  for (const skill of Object.keys(state.player.progression.skills)) {
+  for (const skill of orderedKeys(state.player.progression.skills)) {
     const def = SKILL_BY_ID[skill];
     if (!def) err(`progression.skills.${skill}`, 'unknown skill');
     else if (state.player.progression.skills[skill]! > def.maxLevel) {

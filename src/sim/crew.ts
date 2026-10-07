@@ -29,6 +29,7 @@ import {
   round2,
 } from './state';
 import type { EmployeeAssignment, EmployeeInstance, EmployeeRole, GameState, HiringCandidate, ID } from './types';
+import { orderedEntries } from './ordering';
 
 const B = getBalance();
 const worldReg = getWorldRegistry();
@@ -532,7 +533,7 @@ export function crewTick(state: GameState, rng: Rng): PayrollResult {
         employee.level += 1;
         employee.salaryPerDay = round2(employee.salaryPerDay * 1.06);
         employee.stats.skill = Math.round(clamp(employee.stats.skill + rng.int(2, 5), 1, 99));
-        for (const [skillId, level] of Object.entries(employee.skills)) {
+        for (const [skillId, level] of orderedEntries(employee.skills)) {
           employee.skills[skillId] = Math.min(30, level + 1);
         }
         result.promotions.push({ id: employee.id, name: employee.name, level: employee.level });
@@ -707,7 +708,7 @@ export interface CandidateView {
 export function candidateViews(state: GameState): CandidateView[] {
   return state.player.hiringPool.map((c) => {
     const role = ROLE_BY_ID[c.role];
-    const skills = Object.entries(c.skills).map(([skillId, level]) => ({ skillId, name: SKILL_BY_ID[skillId]?.name ?? skillId, level }));
+    const skills = orderedEntries(c.skills).map(([skillId, level]) => ({ skillId, name: SKILL_BY_ID[skillId]?.name ?? skillId, level }));
     const valueScore = round2(
       (c.stats.skill * 0.4 + c.stats.loyalty * 0.25 + c.stats.morale * 0.15 + c.level * 2) / Math.max(1, c.salaryAskPerDay) * 10,
     );
@@ -780,7 +781,7 @@ export function employeeViews(state: GameState): EmployeeView[] {
       salaryPerDay: e.salaryPerDay,
       salaryShareOfRevenue: round2(e.salaryPerDay / revenue),
       stats: e.stats,
-      skills: Object.entries(e.skills).map(([skillId, level]) => ({ skillId, name: SKILL_BY_ID[skillId]?.name ?? skillId, level })),
+      skills: orderedEntries(e.skills).map(([skillId, level]) => ({ skillId, name: SKILL_BY_ID[skillId]?.name ?? skillId, level })),
       injured: e.injured,
       injuredUntilDay: e.injuredUntilDay,
       trainingUntilDay: e.trainingUntilDay,

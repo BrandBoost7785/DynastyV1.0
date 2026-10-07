@@ -30,6 +30,7 @@ import {
   analyseMarket,
   createMarketState,
   marketKey,
+  politicalPressureIndex,
   quotedPrices,
   scanArbitrage,
   stepMarket,
@@ -79,7 +80,13 @@ export function marketContext(state: GameState): MarketContext {
     const ls = state.world.locations[l.id];
     if (ls) locationStates.set(l.id, ls);
   }
-  return { world: state.world, locations, locationStates };
+  return {
+    world: state.world,
+    locations,
+    locationStates,
+    competitors: Object.values(state.world.competitors),
+    political: politicalPressureIndex(state.world, [...locations.keys()]),
+  };
 }
 
 export function marketAt(state: GameState, locationId: ID, commodityId: ID): MarketState | undefined {
@@ -115,7 +122,10 @@ export function pruneMarkets(state: GameState, cap = 900): number {
       const recency = state.world.day - Math.max(m.lastTradedDay, m.historyStartDay);
       return { key: k, score: recency + (m.volume30d > 0 ? -60 : 0) };
     })
-    .sort((a, b) => b.score - a.score);
+    // Ties are broken by key: without that, *which* market gets evicted when two
+    // are equally stale would depend on key insertion order, and a restored save
+    // (canonical JSON, sorted keys) could evict a different one.
+    .sort((a, b) => b.score - a.score || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   let removed = 0;
   for (const s of scored) {
     if (keys.length - removed <= cap) break;
@@ -1170,6 +1180,13 @@ export function stepMarkets(state: GameState, rng: Rng): StepMarketsResult {
   let stepped = 0;
   const movers: StepMarketsResult['biggestMovers'] = [];
 
+  /*
+   * Deliberately unsorted: each market's daily noise is derived from
+   * (location, commodity, day), so no market's outcome depends on the order this
+   * loop visits them in, and sorting a thousand keys on every day of a long game
+   * is pure cost. Where order *does* leak into the result — the movers list —
+   * the sort below breaks ties on the key.
+   */
   for (const market of Object.values(state.markets)) {
     const before = market.price;
     stepMarket(market, ctx, day);
@@ -1196,7 +1213,12 @@ export function stepMarkets(state: GameState, rng: Rng): StepMarketsResult {
     if (key.startsWith(prefix) && key.endsWith(`:${yesterday}`)) delete state.player.stats.counters[key];
   }
 
-  movers.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
+  movers.sort(
+    (a, b) =>
+      Math.abs(b.change) - Math.abs(a.change) ||
+      (a.commodityId < b.commodityId ? -1 : a.commodityId > b.commodityId ? 1 : 0) ||
+      (a.locationId < b.locationId ? -1 : a.locationId > b.locationId ? 1 : 0),
+  );
   void rng;
   return { stepped, biggestMovers: movers.slice(0, 12) };
 }

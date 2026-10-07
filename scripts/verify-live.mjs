@@ -245,6 +245,26 @@ const NAV_VIEWS = {
   const cheap = [...rows].sort((a, b) => a.price - b.price)[0] ?? { commodityId: 'none', price: 0 };
   check('market rows carry a price', typeof cheap?.price === 'number', JSON.stringify(cheap));
 
+  /*
+   * A market row the server calls `tradable` must carry a real, explained price.
+   * This is the wire-level form of a defect the unit tests found: after travelling to
+   * a city whose book had never been opened, most of the shelf was listed at 0.00
+   * while still claiming to be tradeable.
+   */
+  const tradable = rows.filter((row) => row.tradable === true);
+  check('market read returns tradeable lines', tradable.length > 0, String(tradable.length));
+  const unpriced = tradable.filter((row) => !(row.price > 0));
+  check('every tradeable line carries a positive price', unpriced.length === 0, `${unpriced.length} unpriced of ${tradable.length}`);
+  const unexplained = tradable.filter((row) => !Array.isArray(row.drivers) || row.drivers.length === 0);
+  check('every tradeable line explains its own price', unexplained.length === 0, `${unexplained.length} without drivers`);
+  const inverted = tradable.filter((row) => row.bid > row.ask + 1e-9);
+  check('no line quotes a bid above its ask', inverted.length === 0, `${inverted.length} inverted spreads`);
+  const unbounded = tradable.filter((row) => !Number.isFinite(row.price) || row.price > 1e9);
+  check('no line quotes a price outside the engine bounds', unbounded.length === 0, `${unbounded.length} out of bounds`);
+  const multiMarket = await alice('GET', `/api/games/${gameId}/views/market?limit=400`);
+  const allRows = multiMarket.json?.data?.data?.rows ?? [];
+  check('the market read is bounded but substantial', allRows.length >= 20 && allRows.length <= 400, String(allRows.length));
+
   const unknownIntent = await alice('POST', `/api/games/${gameId}/intent`, { intent: { type: 'economy.free_money' }, expectedVersion: version });
   eq('unknown intent is rejected', unknownIntent.status, 400);
   check('unknown intent reports validation', ['validation_failed', 'invalid_input', 'unknown_intent'].includes(unknownIntent.json?.error?.code), JSON.stringify(unknownIntent.json?.error));
@@ -634,6 +654,77 @@ async function runIntent(label, body) {
   check('a stale restore replay cannot roll the save twice', replayedRestore.status === 409, `${replayedRestore.status} ${JSON.stringify(replayedRestore.json?.error)}`);
   const stillLive = await alice('GET', `/api/games/${gameId}/state`);
   check('the save stays on the restored version after a refused replay', stillLive.json?.data?.meta?.version === version, `${stillLive.json?.data?.meta?.version} vs ${version}`);
+}
+
+/*
+ * Restore/replay determinism over the wire.
+ *
+ * The point of this check is that a *stored* save and the live run it came from
+ * behave identically. That is exactly the property that was broken: saves are written
+ * as canonical JSON with sorted keys, and the simulation's iteration order is
+ * observable to its seeded RNG, so a restored world used to diverge from the run that
+ * produced it. Nothing here is sampled: the digest covers every priced field of every
+ * market row the server returns, plus cash, day and net worth.
+ *
+ * Wall-clock timestamps and internal timing diagnostics are not part of the DTO and
+ * therefore need no exclusions; a difference in any of them (or in any economic
+ * value) fails the check.
+ */
+{
+  const digestOf = (marketView, stateView) => {
+    const rows = (marketView.json?.data?.data?.rows ?? [])
+      .filter((row) => row.tradable === true)
+      .map((row) => [row.commodityId, row.price, row.bid, row.ask, row.supply, row.demand, row.channel])
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+    const state = stateView.json?.data?.state;
+    return JSON.stringify({
+      rows,
+      day: state?.world?.day,
+      cash: state?.netWorth?.cash,
+      netWorth: state?.netWorth?.total,
+      locations: state?.world?.locationsDiscovered ?? null,
+    });
+  };
+  const marketView = () => alice('GET', `/api/games/${gameId}/views/market?limit=400`);
+  const stateView = () => alice('GET', `/api/games/${gameId}/state`);
+
+  const startVersion = (await stateView()).json?.data?.meta?.version;
+  const beforeDigest = digestOf(await marketView(), await stateView());
+
+  // 1. Advance the world: this is the recorded run (SAVE A → commands → result).
+  const first = await alice('POST', `/api/games/${gameId}/advance`, { days: 2, expectedVersion: startVersion, requestId: `${stamp}-det-first` });
+  check('the determinism baseline advance succeeds', first.json?.data?.ok === true, JSON.stringify(first.json?.error));
+  const afterFirstDigest = digestOf(await marketView(), await stateView());
+
+  // 2. Restore the save the run started from…
+  const restored = await alice('POST', `/api/games/${gameId}/versions/${startVersion}`, { confirm: true, expectedVersion: first.json?.data?.meta?.version, requestId: `${stamp}-det-restore` });
+  check('the determinism baseline save restores', restored.status === 200, `${restored.status} ${JSON.stringify(restored.json?.error)}`);
+  const restoredVersion = restored.json?.data?.meta?.version ?? restored.json?.data?.state?.meta?.version ?? restored.json?.data?.game?.meta?.version;
+  check('the restore reports a forward version', typeof restoredVersion === 'number', String(restoredVersion));
+  const restoredDigest = digestOf(await marketView(), await stateView());
+  check('the restored save is the state the run started from', restoredDigest === beforeDigest, 'restored state differs from the pre-run state');
+
+  // 3. …and run the identical commands again.
+  const second = await alice('POST', `/api/games/${gameId}/advance`, { days: 2, expectedVersion: restoredVersion, requestId: `${stamp}-det-second` });
+  check('the determinism replay advance succeeds', second.json?.data?.ok === true, JSON.stringify(second.json?.error));
+  const afterSecondDigest = digestOf(await marketView(), await stateView());
+
+  check(
+    'replaying the same commands from the same save lands on the same state',
+    afterSecondDigest === afterFirstDigest,
+    firstDiff(afterFirstDigest, afterSecondDigest),
+  );
+  version = second.json?.data?.meta?.version ?? version;
+}
+
+/** First differing field between two digests, for a readable harness failure. */
+function firstDiff(a, b) {
+  if (a === b) return '';
+  const la = a.split(','); const lb = b.split(',');
+  for (let i = 0; i < Math.max(la.length, lb.length); i += 1) {
+    if (la[i] !== lb[i]) return `index ${i}: ${la[i]} vs ${lb[i]}`;
+  }
+  return 'differs';
 }
 
 /* --- 10. pagination and read sanity ---------------------------------- */

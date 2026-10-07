@@ -562,8 +562,16 @@ describe('dispatcher', () => {
   it('refuses a lot too small to cover its own fees instead of paying the player to sell', () => {
     const state = richState();
     const rng = rngForDay(state, 1);
-    // Bulk water is cheap: one unit cannot clear the flat settlement fee.
-    const cheap = commodityReg.all().find((c) => c.legality === 'legal' && c.baseValue < 2 && c.id.includes('bulk'));
+    // A bulk good this market actually stocks — one unit cannot clear the flat
+    // settlement fee. Chosen from the local roster rather than from the whole
+    // catalogue: not every cheap good is traded in every city, and a quote for an
+    // unstocked good would test the wrong refusal.
+    const stocked = new Set(getWorldRegistry().location(state.player.locationId)!.tradedCommodityIds);
+    const cheap = commodityReg
+      .all()
+      .filter((c) => stocked.has(c.id))
+      .filter((c) => c.legality === 'legal' && c.baseValue < 2 && c.id.includes('bulk'))
+      .pop();
     if (!cheap) return;
     const buy = dispatch(state, rng, { type: 'trade.buy', commodityId: cheap.id, qty: 1 } as ActionIntent, { userId: 'u' });
     if (!buy.ok) return;

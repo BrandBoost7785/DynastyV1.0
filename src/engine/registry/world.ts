@@ -21,6 +21,7 @@ import type {
 } from '../../sim/types';
 import { getCommodityRegistry } from './commodities';
 import { COUNTRY_BY_ID, REGION_BY_ID } from './regions';
+import { fnv1aHex } from '../../lib/hash';
 
 /* ------------------------------------------------------------------ */
 /* Authoring helpers                                                   */
@@ -700,7 +701,24 @@ function legalityToleranceFactor(l: LocationDef, c: CommodityDef): number {
   }
 }
 
-function scoreCommodityFor(l: LocationDef, c: CommodityDef): number {
+/**
+ * **Existence** score: does this location's economy have any reason to trade this
+ * good at all?
+ *
+ * This is deliberately *not* a depth score. `availability` and `baseDemand` say how
+ * much of a good moves, and they are already used by the economic engine to set
+ * supply, demand and therefore price. Letting the same numbers decide *whether* a
+ * market carries a good collapsed the catalogue: bulk legal staples out-scored
+ * every scarce, processed, restricted or high-value SKU in all 48 cities, so 491 of
+ * 765 commodities appeared in no market anywhere — including 21 of the 44
+ * production recipes' own inputs and outputs.
+ *
+ * Depth parameters therefore enter here with their exponent flattened to a
+ * near-constant, which preserves a mild preference for goods that move in volume
+ * while letting legality, regional preference, category demand and location kind
+ * decide the answer — the things that actually make regional economies different.
+ */
+function existenceScore(l: LocationDef, c: CommodityDef): number {
   const region = REGION_BY_ID[l.regionId];
   const pref = c.regionalPreference[l.regionId] ?? 1;
   const categoryDemand = l.demandProfile[c.category] ?? 1;
@@ -715,30 +733,164 @@ function scoreCommodityFor(l: LocationDef, c: CommodityDef): number {
         : archetype === 'remote' && c.volumeL > 2000
           ? 0.2
           : 1;
-  return c.availability * pref * categoryDemand * tolerance * kindFit * (0.6 + c.baseDemand / 400);
+  // Flat (0.45 … 1.0 for availability; 0.66 … 1.0 for demand), so volume still
+  // nudges the ranking without vetoing scarce goods.
+  const depthPreference = Math.pow(Math.max(0.02, c.availability), 0.15) * Math.pow(0.6 + Math.min(4, c.baseDemand) / 400, 0.3);
+  return pref * categoryDemand * tolerance * kindFit * depthPreference;
 }
 
-function deriveTradedCommodities(l: LocationDef, registry: ReturnType<typeof getCommodityRegistry>): string[] {
-  const rng = new Rng(`traded:${l.id}`, 'world-gen');
-  const n = tradedCount(l);
-  const scored = registry
-    .all()
-    .map((c) => ({ c, s: scoreCommodityFor(l, c) * rng.float(0.88, 1.12) }))
-    .filter((x) => x.s > 0.04)
-    .sort((a, b) => b.s - a.s)
-    .slice(0, n)
-    .map((x) => x.c.id);
+/**
+ * Per-(market, commodity) taste.
+ *
+ * Variants of one base good (wheat: bulk / premium / organic) score almost
+ * identically, so a deterministic ranking alone would let one grade sweep every
+ * city and orphan its siblings. A seeded hash gives every pair its own small
+ * preference, which is what spreads grades and forms across the world. The band is
+ * ±22%: far too small to move a good across categories (a rural town still prefers
+ * staples to zero-days by a factor of twenty) and just wide enough to break ties
+ * between siblings deterministically.
+ */
+function marketTaste(locationId: ID, commodityId: ID): number {
+  const h = parseInt(fnv1aHex(`${locationId}|${commodityId}`), 16);
+  return 0.78 + ((h % 10_000) / 10_000) * 0.44;
+}
 
-  // Specialities are always tradeable at home, regardless of score.
-  for (const spec of l.specialties) {
-    if (registry.has(spec) && !scored.includes(spec)) scored.push(spec);
+/**
+ * How many markets a good should reach, by how generally it is traded. Scarce and
+ * dangerous goods stay scarce; staples are everywhere. This is what keeps
+ * "every good is reachable" from meaning "every good is everywhere".
+ */
+function targetMarketsFor(c: CommodityDef): number {
+  if (c.rarity >= 5) return 2;
+  if (c.rarity >= 4) return 3;
+  if (c.legality === 'contraband') return 3;
+  if (c.rarity >= 3) return 4;
+  return 6;
+}
+
+export interface MarketCoverage {
+  commodities: number;
+  reachable: number;
+  unreachable: { id: string; category: string; legality: string; rarity: number }[];
+  reachableLocations: number;
+  marketsTotal: number;
+  perMarket: { id: string; lines: number }[];
+}
+
+const STAPLE_COMMODITIES = ['flour__bulk', 'canned_goods__packaged', 'bottled_water__packaged', 'diesel__refined', 'gasoline__refined'];
+
+/**
+ * Compose every location's open market roster.
+ *
+ * A greedy "each city takes its own top N" cannot cover a catalogue several times
+ * larger than a market: the same elite goods win everywhere and the long tail is
+ * never stocked. This runs a quota-respecting deferred-acceptance assignment
+ * instead — commodities propose to the markets that want them most, each market
+ * keeps the best proposals up to its quota, and rejected commodities fall through to
+ * their next-best market until every good has a home or has run out of cities that
+ * find it acceptable.
+ *
+ * Consequences that matter for gameplay:
+ *  • every tradeable good is reachable somewhere (no orphaned catalogue entries);
+ *  • a good still only appears in the handful of markets that suit it, so regional
+ *    specialisation and arbitrage survive;
+ *  • market size stays bounded by `tradedCount`, so a city square is still readable.
+ *
+ * Complexity is O(catalogue × quota) proposals, not O(catalogue × locations), which
+ * keeps 1,000 locations × 5,000 SKUs tractable.
+ */
+function composeMarkets(locations: LocationDef[], registry: ReturnType<typeof getCommodityRegistry>): Map<ID, string[]> {
+  const all = registry.all();
+  const byId = new Map(all.map((c) => [c.id, c]));
+
+  // Preference lists: for each commodity, locations ranked by its own taste for them.
+  interface Proposal { commodityId: ID; locationId: ID; score: number }
+  const queues = new Map<ID, Proposal[]>();
+  for (const c of all) {
+    const ranked: Proposal[] = [];
+    for (const l of locations) {
+      const score = existenceScore(l, c) * marketTaste(l.id, c.id);
+      if (score > 0.02) ranked.push({ commodityId: c.id, locationId: l.id, score });
+    }
+    ranked.sort((a, b) => b.score - a.score || (a.locationId < b.locationId ? -1 : 1));
+    queues.set(c.id, ranked);
   }
-  // Staple goods must exist everywhere or the player can starve in a small town.
-  const staples = ['flour__bulk', 'canned_goods__packaged', 'bottled_water__packaged', 'diesel__refined', 'gasoline__refined'];
-  for (const s of staples) {
-    if (registry.has(s) && !scored.includes(s)) scored.push(s);
+
+  // Each market holds its best proposals, up to its quota; the weakest is evicted
+  // when a better one arrives. Deterministic: ties break on commodity id.
+  const held = new Map<ID, Proposal[]>();
+  // A good that is scarce in a market's taste still deserves a home, so the quota is
+  // split: most of a market's lines are the goods it likes best, the remainder is
+  // reserved for goods the world has few markets for.
+  const quota = new Map<ID, number>();
+  for (const l of locations) {
+    held.set(l.id, []);
+    quota.set(l.id, tradedCount(l));
   }
-  return scored;
+
+  const worse = (a: Proposal, b: Proposal): boolean => a.score < b.score || (a.score === b.score && a.commodityId > b.commodityId);
+  const covered = new Map<ID, number>();
+  for (const c of all) covered.set(c.id, 0);
+
+  // Order commodities from rarest to most common so scarce goods claim their few
+  // suitable markets before abundant ones fill them.
+  const order = [...all].sort((a, b) => targetMarketsFor(a) - targetMarketsFor(b) || (a.id < b.id ? -1 : 1));
+
+  for (const c of order) {
+    const target = targetMarketsFor(c);
+    const queue = queues.get(c.id) ?? [];
+    for (const proposal of queue) {
+      if ((covered.get(c.id) ?? 0) >= target) break;
+      const list = held.get(proposal.locationId)!;
+      const cap = quota.get(proposal.locationId)!;
+      if (list.length < cap) {
+        list.push(proposal);
+        covered.set(c.id, (covered.get(c.id) ?? 0) + 1);
+      } else {
+        // Replace the weakest held line only if this good suits the market better.
+        let weakestIndex = 0;
+        for (let i = 1; i < list.length; i += 1) if (worse(list[i]!, list[weakestIndex]!)) weakestIndex = i;
+        const weakest = list[weakestIndex]!;
+        if (worse(weakest, proposal)) {
+          // Never evict a good on its last market: coverage outranks local taste.
+          if ((covered.get(weakest.commodityId) ?? 0) <= 1) continue;
+          list[weakestIndex] = proposal;
+          covered.set(weakest.commodityId, (covered.get(weakest.commodityId) ?? 0) - 1);
+          covered.set(c.id, (covered.get(c.id) ?? 0) + 1);
+        }
+      }
+    }
+  }
+
+  const result = new Map<ID, string[]>();
+  for (const l of locations) {
+    const lines = new Set<string>((held.get(l.id) ?? []).map((p) => p.commodityId));
+    // Specialities are always tradeable at home, whatever the taste model says.
+    for (const spec of l.specialties) if (byId.has(spec)) lines.add(spec);
+    // Staples must exist everywhere or the player can starve in a small town.
+    for (const s of STAPLE_COMMODITIES) if (byId.has(s)) lines.add(s);
+    /*
+     * Top-up pass. A thin market is a bad market: a town whose quota says 22 lines
+     * should show 22 lines, not the handful the draft happened to leave it. The
+     * shortfall is filled from that location's own best remaining candidates, so the
+     * character of the market is preserved — this only restores depth the global
+     * assignment spent elsewhere.
+     */
+    const cap = quota.get(l.id) ?? tradedCount(l);
+    if (lines.size < cap) {
+      const ranked = all
+        .filter((c) => !lines.has(c.id))
+        .map((c) => ({ id: c.id, score: existenceScore(l, c) * marketTaste(l.id, c.id) }))
+        .filter((x) => x.score > 0.02)
+        .sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
+      for (const candidate of ranked) {
+        if (lines.size >= cap) break;
+        lines.add(candidate.id);
+      }
+    }
+    result.set(l.id, [...lines].sort());
+  }
+  return result;
 }
 
 /**
@@ -937,9 +1089,13 @@ export class WorldRegistry {
 
   constructor(locations?: LocationDef[], routes?: RouteDef[]) {
     const registry = getCommodityRegistry();
-    this.locations = (locations ?? LOCATION_SEEDS.map(loc)).map((l) => ({
+    const base = locations ?? LOCATION_SEEDS.map(loc);
+    // Rosters are composed for the whole world at once: coverage is a global
+    // property, so it cannot be decided one city at a time.
+    const composed = composeMarkets(base, registry);
+    this.locations = base.map((l) => ({
       ...l,
-      tradedCommodityIds: l.tradedCommodityIds.length > 0 ? l.tradedCommodityIds : deriveTradedCommodities(l, registry),
+      tradedCommodityIds: l.tradedCommodityIds.length > 0 ? l.tradedCommodityIds : (composed.get(l.id) ?? []),
     }));
     this.locById = new Map(this.locations.map((l) => [l.id, l]));
     this.routes = routes ?? deriveRoutes(this.locations);
@@ -1066,6 +1222,31 @@ export class WorldRegistry {
     const l = this.locById.get(locationId);
     if (!l) return c.legality;
     return l.laws.legalityOverrides[c.category] ?? c.legality;
+  }
+
+  /**
+   * Catalogue reachability, for tests, the economy inspector and operations.
+   *
+   * Server-side only: it is never part of a DTO. It answers "can a player actually
+   * buy and sell this good somewhere, and if not why not", which is what keeps the
+   * market composer honest as the catalogue grows.
+   */
+  coverage(): MarketCoverage {
+    const registry = getCommodityRegistry();
+    const traded = new Map<string, number>();
+    for (const l of this.locations) for (const id of l.tradedCommodityIds) traded.set(id, (traded.get(id) ?? 0) + 1);
+    const unreachable = registry
+      .all()
+      .filter((c) => !traded.has(c.id))
+      .map((c) => ({ id: c.id, category: c.category, legality: c.legality, rarity: c.rarity }));
+    return {
+      commodities: registry.all().length,
+      reachable: traded.size,
+      unreachable,
+      reachableLocations: this.locations.filter((l) => l.tradedCommodityIds.length > 0).length,
+      marketsTotal: [...traded.values()].reduce((sum, n) => sum + n, 0),
+      perMarket: this.locations.map((l) => ({ id: l.id, lines: l.tradedCommodityIds.length })),
+    };
   }
 
   isTolerated(locationId: ID, c: CommodityDef): boolean {

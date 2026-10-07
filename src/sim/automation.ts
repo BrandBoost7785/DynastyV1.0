@@ -31,6 +31,7 @@ import { stake, buyCrypto, cryptoMarketView } from './crypto';
 import { creditCash, debitCash, formatMoney, newId, pushDiagnostic, pushNotification, round2, spendable } from './state';
 import { automationErrorReduction } from './modifiers';
 import type { AutomationResult, AutomationRule, EmployeeInstance, GameState, ID, TravelMode } from './types';
+import { orderedEntries } from './ordering';
 
 const B = getBalance();
 const worldReg = getWorldRegistry();
@@ -809,7 +810,7 @@ function runAutoShip(state: GameState, rng: Rng, rule: AutomationRule, actions: 
 
 function bestDestination(state: GameState, commodityId: ID, localPrice: number): { locationId: ID; price: number; margin: number } | null {
   let best: { locationId: ID; price: number; margin: number } | null = null;
-  for (const [key, market] of Object.entries(state.markets)) {
+  for (const [key, market] of orderedEntries(state.markets)) {
     if (market.commodityId !== commodityId || market.locationId === state.player.locationId) continue;
     const margin = localPrice > 0 ? market.price / localPrice - 1 : 0;
     if (margin <= 0) continue;

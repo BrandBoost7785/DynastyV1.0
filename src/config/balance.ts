@@ -549,6 +549,13 @@ export const BALANCE = {
     cooldownDaysDefault: 22,
     newsRetentionDays: 90,
     effectDurationDaysDefault: 12,
+    /**
+     * Ceiling on `world.activeEvents`. Instantaneous events leave the list at the
+     * end of the day they fire, so this only ever binds when a burst of duration
+     * events overlaps — but it is the guarantee that the list (which is shown in the
+     * UI and stored in every save) cannot grow without bound.
+     */
+    maxActiveEvents: 36,
     severityWeights: { minor: 0.5, moderate: 0.32, major: 0.14, catastrophic: 0.04 } as Record<string, number>,
   },
 

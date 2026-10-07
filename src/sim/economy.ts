@@ -23,10 +23,12 @@ import { getBalance } from '../config/balance';
 import { getCommodityRegistry } from '../engine/registry/commodities';
 import { getWorldRegistry } from '../engine/registry/world';
 import { REGION_BY_ID } from '../engine/registry/regions';
+import { FACTION_BY_ID } from '../engine/registry/actors';
 import type {
   ActiveShock,
   CommodityCategory,
   CommodityDef,
+  CompetitorState,
   ID,
   LocationDef,
   LocationState,
@@ -34,6 +36,7 @@ import type {
   PriceDriver,
   WorldState,
 } from './types';
+import { orderedEntries, orderedValues } from './ordering';
 
 const B = getBalance();
 
@@ -59,6 +62,81 @@ function noiseRng(locationId: ID, commodityId: ID, day: number): Rng {
 /* ------------------------------------------------------------------ */
 /* Baseline quantities                                                 */
 /* ------------------------------------------------------------------ */
+
+/**
+ * How much the political situation at a location moves its markets.
+ *
+ * Factions already took territory, declared wars, disrupted routes and gated
+ * standing-locked goods, but none of that reached a price: a city under the thumb
+ * of a syndicate traded identically to one run by a bank, and a city whose
+ * neighbours were at war imported as freely as anywhere else. These are the
+ * channels that were missing.
+ *
+ * Everything here is a function of world state — no randomness, no player input —
+ * and every multiplier comes back with a driver so a player can see *why* the
+ * shelf got dearer.
+ */
+export interface FactionMarketPressure {
+  /** Multiplier on daily replenishment. War chokes supply; syndicates smuggle more in. */
+  supplyMultiplier: number;
+  /** Multiplier on the fundamental price. */
+  priceMultiplier: number;
+  /** Multiplier on demand. Conflict drives hoarding; syndicates drive vice demand. */
+  demandMultiplier: number;
+  drivers: PriceDriver[];
+}
+
+export function factionMarketPressure(world: WorldState, locationId: ID): FactionMarketPressure {
+  let supplyMultiplier = 1;
+  let priceMultiplier = 1;
+  let demandMultiplier = 1;
+  const drivers: PriceDriver[] = [];
+
+  for (const faction of Object.values(world.factions)) {
+    const def = FACTION_BY_ID[faction.factionId];
+    if (!def) continue;
+    const controlsHere = faction.controlledLocationIds.includes(locationId);
+
+    // Occupation shapes a market: vice thrives under a syndicate, commerce under a
+    // bank, and the state's own turf is the most tightly run of all.
+    if (controlsHere) {
+      if (def.kind === 'criminal_syndicate') {
+        demandMultiplier *= 1.05;
+        supplyMultiplier *= 1.04;
+        drivers.push({ label: `${def.name} controls this market`, contribution: 0.05, kind: 'sentiment' });
+      } else if (def.kind === 'bank' || def.kind === 'corporation') {
+        priceMultiplier *= 1.03;
+        supplyMultiplier *= 1.02;
+        drivers.push({ label: `${def.name} operates here`, contribution: 0.03, kind: 'regional' });
+      }
+    }
+
+    // A war the location is part of, or sits between, raises prices and thins shelves.
+    for (const enemyId of faction.atWarWith) {
+      if (faction.factionId > enemyId) continue; // count each war once
+      const enemy = world.factions[enemyId];
+      if (!enemy) continue;
+      const here = controlsHere || enemy.controlledLocationIds.includes(locationId);
+      if (!here) continue;
+      const severity = 0.9 - 0.12 * Math.min(3, faction.atWarWith.length + enemy.atWarWith.length) * 0.5;
+      supplyMultiplier *= severity;
+      priceMultiplier *= 2 - severity;
+      demandMultiplier *= 1.04;
+      drivers.push({
+        label: `War: ${def.name} vs ${FACTION_BY_ID[enemyId]?.name ?? enemyId}`,
+        contribution: (2 - severity) - 1,
+        kind: 'event',
+      });
+    }
+  }
+
+  return {
+    supplyMultiplier: clamp(supplyMultiplier, 0.5, 1.4),
+    priceMultiplier: clamp(priceMultiplier, 0.85, 1.6),
+    demandMultiplier: clamp(demandMultiplier, 0.85, 1.4),
+    drivers: drivers.slice(0, 3),
+  };
+}
 
 /**
  * Baseline daily supply (units) of a commodity at a location, before dynamic
@@ -191,6 +269,8 @@ export interface FundamentalContext {
   commodity: CommodityDef;
   world: WorldState;
   day: number;
+  /** Pre-computed political pressure for this location, when the caller has it. */
+  political?: FactionMarketPressure;
 }
 
 export interface FundamentalBreakdown {
@@ -275,6 +355,12 @@ export function computeFundamental(ctx: FundamentalContext): FundamentalBreakdow
     components.push({ label: 'National tax regime', value: taxEffect, kind: 'regional' });
   }
 
+  const political = ctx.political ?? factionMarketPressure(world, location.id);
+  if (political.priceMultiplier !== 1) {
+    price *= political.priceMultiplier;
+    components.push({ label: 'Faction control and conflict', value: political.priceMultiplier, kind: 'event' });
+  }
+
   return { price: Math.max(0.01, price), components };
 }
 
@@ -291,6 +377,28 @@ export interface MarketContext {
   world: WorldState;
   locations: Map<ID, LocationDef>;
   locationStates: Map<ID, LocationState>;
+  /**
+   * Competitors in canonical order. `competitorPressure` multiplies their
+   * aggression together, and floating-point multiplication is not associative, so
+   * the order is part of the result — but it only has to be computed once per tick,
+   * not once per market.
+   */
+  competitors?: CompetitorState[];
+  /**
+   * Political pressure per location, computed once when the context is built.
+   * It is a pure function of the world state, and every market at a location shares
+   * the answer — recomputing it per market meant scanning all factions (and their
+   * territory lists) for every line on every shelf, which measured as the single
+   * most expensive thing the economy did.
+   */
+  political?: Map<ID, FactionMarketPressure>;
+}
+
+/** Political pressure for every location on the map, computed in one pass. */
+export function politicalPressureIndex(world: WorldState, locationIds: ID[]): Map<ID, FactionMarketPressure> {
+  const index = new Map<ID, FactionMarketPressure>();
+  for (const locationId of locationIds) index.set(locationId, factionMarketPressure(world, locationId));
+  return index;
 }
 
 /** Create the stored state for a market that has just become relevant. */
@@ -312,7 +420,10 @@ export function createMarketState(
   const demand = baseDemandUnits(location, commodity, ctx.world, locationState);
   const rng = new Rng(`mkt-init:${locationId}:${commodityId}:${day}`, 'market-init');
   const seededScarcity = clamp(Math.pow(demand / Math.max(0.1, supply), B.economy.priceElasticity), ...B.economy.scarcityClamp);
-  const price = clamp(fundamental * seededScarcity * rng.float(0.94, 1.06), fundamental * B.market.priceFloorFraction, fundamental * B.market.priceCeilingMultiple);
+  // One draw, captured rather than inlined: it is both the opening wobble and one
+  // of the two drivers that explain the opening price (see `seedDrivers` below).
+  const openingWobble = rng.float(0.94, 1.06);
+  const price = clamp(fundamental * seededScarcity * openingWobble, fundamental * B.market.priceFloorFraction, fundamental * B.market.priceCeilingMultiple);
 
   const history: number[] = [];
   // Back-fill a short synthetic history so charts and trend indicators are
@@ -344,7 +455,7 @@ export function createMarketState(
     historyStartDay: day - backDays,
     lastTradedDay: -1,
     volume30d: 0,
-    drivers: [],
+    drivers: seedDrivers(fundamental, price, demand, supply, seededScarcity, openingWobble),
   };
 }
 
@@ -355,6 +466,44 @@ function round2(v: number): number {
 export interface StepMarketResult {
   market: MarketState;
   drivers: PriceDriver[];
+}
+
+/**
+ * Explain a freshly seeded price in the same vocabulary `stepMarket` uses.
+ *
+ * A market's first view used to carry the price but no explanation, so the very
+ * first screen a player opens showed a quotation several percent away from
+ * fundamental with an empty "why" list. The opening price is formed from exactly
+ * two contributions — the seeded scarcity of the location and the bid/ask
+ * imbalance of the opening book — so those are what it reports.
+ *
+ * The list is never empty: if both contributions round away, the larger of the two
+ * is kept, because "this price is the fundamental price" is itself an explanation
+ * and a blank panel is not.
+ */
+function seedDrivers(
+  fundamental: number,
+  price: number,
+  demand: number,
+  supply: number,
+  scarcity: number,
+  wobble: number,
+  cap = 6,
+): PriceDriver[] {
+  const candidates: PriceDriver[] = [
+    {
+      label: `Scarcity (${round2(demand)} demand / ${round2(supply)} supply)`,
+      contribution: scarcity - 1,
+      kind: 'supply',
+    },
+    { label: 'Opening book imbalance', contribution: wobble - 1, kind: 'noise' },
+    { label: 'Against fundamental', contribution: fundamental > 0 ? price / fundamental - 1 : 0, kind: 'regional' },
+  ];
+  const kept = candidates.filter((d) => Math.abs(d.contribution) > 0.0015);
+  const ranked = (kept.length > 0 ? kept : [candidates.reduce((a, b) => (Math.abs(b.contribution) > Math.abs(a.contribution) ? b : a))])
+    .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
+    .slice(0, cap);
+  return ranked;
 }
 
 /**
@@ -397,7 +546,14 @@ export function stepMarket(market: MarketState, ctx: MarketContext, day: number)
   let demand = market.demand + (baseDemand - market.demand) * 0.18;
 
   // Competitor and faction activity perturbs local supply/demand.
-  const comp = competitorPressure(ctx.world, location, commodity);
+  const political = ctx.political?.get(location.id) ?? factionMarketPressure(ctx.world, location.id);
+  if (political.supplyMultiplier !== 1 || political.demandMultiplier !== 1) {
+    supply *= political.supplyMultiplier;
+    demand *= political.demandMultiplier;
+    drivers.push(...political.drivers);
+  }
+
+  const comp = competitorPressure(ctx.world, location, commodity, ctx.competitors);
   if (comp !== 1) {
     supply *= comp < 1 ? 1 : comp;
     demand *= comp > 1 ? comp : 1;
@@ -419,14 +575,19 @@ export function stepMarket(market: MarketState, ctx: MarketContext, day: number)
   }
   let playerImpact = market.playerImpact;
   if (playerImpact !== 0) {
+    // Report the footprint the player actually left, before decay: a trade the
+    // player made is never noise, however small, and the market should be able to
+    // say "this moved because of you". The filter at the bottom of this function
+    // keeps player entries for exactly that reason.
+    const footprint = playerImpact;
     playerImpact *= 1 - B.market.impactRelaxationPerDay;
     if (Math.abs(playerImpact) < 0.001) playerImpact = 0;
-    drivers.push({ label: 'Your recent trading', contribution: playerImpact, kind: 'player' });
+    drivers.push({ label: 'Your recent trading', contribution: footprint, kind: 'player' });
   }
 
   /* ---- expiring shocks ---- */
   const shocks: Record<ID, number> = {};
-  for (const [id, mul] of Object.entries(market.shocks)) {
+  for (const [id, mul] of orderedEntries(market.shocks)) {
     const shock = ctx.world.shocks.find((s) => s.id === id);
     if (shock && shockApplies(shock, location, day)) shocks[id] = mul;
   }
@@ -478,10 +639,18 @@ export function stepMarket(market: MarketState, ctx: MarketContext, day: number)
   market.history = history;
   market.historyStartDay = historyStartDay;
   market.volume30d = Math.max(0, market.volume30d - market.volume30d * 0.033);
-  market.drivers = drivers
-    .filter((d) => Math.abs(d.contribution) > 0.0015)
-    .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution))
-    .slice(0, 6);
+  /*
+   * Rank the explanation, then make sure the player's own footprint survives the
+   * cut. It is usually the smallest term in the list — a player trading 18 units
+   * against a 28,000-unit book is a rounding error next to a war — but it is the one
+   * entry the player can act on, so it is never the one dropped.
+   */
+  const ranked = drivers
+    .filter((d) => d.kind === 'player' || Math.abs(d.contribution) > 0.0015)
+    .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
+  const mine = ranked.filter((d) => d.kind === 'player');
+  const rest = ranked.filter((d) => d.kind !== 'player').slice(0, Math.max(0, 6 - mine.length));
+  market.drivers = [...mine, ...rest].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
 
   return { market, drivers: market.drivers };
 }
@@ -490,9 +659,14 @@ export function stepMarket(market: MarketState, ctx: MarketContext, day: number)
  * Competitor/NPC pressure on a market: aggregates the activity of simulated
  * competitor firms operating at this location with interest in this category.
  */
-export function competitorPressure(world: WorldState, location: LocationDef, c: CommodityDef): number {
+export function competitorPressure(
+  world: WorldState,
+  location: LocationDef,
+  c: CommodityDef,
+  ordered?: CompetitorState[],
+): number {
   let pressure = 1;
-  for (const comp of Object.values(world.competitors)) {
+  for (const comp of ordered ?? Object.values(world.competitors)) {
     if (!comp.operatingLocationIds.includes(location.id)) continue;
     if (!comp.focus.includes(c.category)) continue;
     const aggression = comp.aggression * (0.6 + comp.capital / 10_000_000);
@@ -701,7 +875,7 @@ export function scanArbitrage(markets: Record<string, MarketState>, opts: { minM
   const worldReg = getWorldRegistry();
   const registry = getCommodityRegistry();
   const byCommodity = new Map<ID, MarketState[]>();
-  for (const m of Object.values(markets)) {
+  for (const m of orderedValues(markets)) {
     const arr = byCommodity.get(m.commodityId);
     if (arr) arr.push(m);
     else byCommodity.set(m.commodityId, [m]);
@@ -781,7 +955,7 @@ export function achievableMargin(
 
 /** Aggregate commodity price index across materialised markets (UI indicator). */
 export function commodityPriceIndex(markets: Record<string, MarketState>): number {
-  const list = Object.values(markets);
+  const list = orderedValues(markets);
   if (list.length === 0) return 1;
   let sum = 0;
   for (const m of list) sum += m.fundamental > 0 ? m.price / m.fundamental : 1;

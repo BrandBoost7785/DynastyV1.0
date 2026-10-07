@@ -33,6 +33,7 @@ import {
   spendable,
 } from './state';
 import type { DataAsset, GameState, ID } from './types';
+import { orderedEntries } from './ordering';
 
 const B = getBalance();
 const worldReg = getWorldRegistry();
@@ -967,7 +968,7 @@ export function undergroundTick(state: GameState, rng: Rng): UndergroundTickResu
   result.assetsHeld = underground.dataAssets.length;
 
   // Vendor relationships cool off without trade.
-  for (const [id, value] of Object.entries(underground.vendorRelationships)) {
+  for (const [id, value] of orderedEntries(underground.vendorRelationships)) {
     if (value > 0) underground.vendorRelationships[id] = round2(clamp(value - 0.004, 0, 1));
   }
   return result;
