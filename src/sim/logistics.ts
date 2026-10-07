@@ -14,7 +14,7 @@
 
 import { Rng } from '../engine/rng';
 import { getBalance } from '../config/balance';
-import { VEHICLES, VEHICLE_UPGRADE_BY_ID } from '../engine/registry/assets';
+import { VEHICLES, VEHICLE_UPGRADES, VEHICLE_UPGRADE_BY_ID } from '../engine/registry/assets';
 import { getCommodityRegistry } from '../engine/registry/commodities';
 import { getWorldRegistry } from '../engine/registry/world';
 import { addItem, createStorageFromVehicle, getStorage, quantityOnHand, removeCommodity, storagesAtLocation } from './inventory';
@@ -1026,6 +1026,18 @@ export function logisticsView(state: GameState): LogisticsView {
         speedKmPerDay: v.speedKmPerDay,
         odometerKm: Math.round(v.odometerKm),
         upgrades: v.upgrades.map((id) => ({ id, name: VEHICLE_UPGRADE_BY_ID[id]?.name ?? id })),
+        /**
+         * The upgrade catalogue for *this* vehicle, so the client never has to hold a
+         * copy of the registry: price, description and whether it is already fitted.
+         */
+        upgradeOptions: VEHICLE_UPGRADES.map((upgrade) => ({
+          id: upgrade.id,
+          name: upgrade.name,
+          description: upgrade.description,
+          price: upgrade.price,
+          installed: v.upgrades.includes(upgrade.id),
+          affordable: state.player.accounts.reduce((sum, account) => sum + account.balance, 0) >= upgrade.price,
+        })),
         freeUpgradeSlots: Math.max(0, (def?.upgradeSlots ?? 0) - v.upgrades.length),
         inUseBy: v.inUseBy,
         value: round2((def?.price ?? v.purchasePrice) * (0.35 + v.condition * 0.5) * (1 - v.damage * 0.3)),

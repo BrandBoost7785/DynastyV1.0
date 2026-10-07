@@ -9,7 +9,7 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    include: ['tests/**/*.test.ts'],
+    include: ['tests/**/*.test.ts', 'tests/**/*.test.tsx'],
     // Deterministic simulation tests must never be order-dependent.
     sequence: { concurrent: false },
     testTimeout: 60_000,

@@ -16,7 +16,7 @@
  */
 import type { GameState } from '../../sim/types';
 import { automationView } from '../../sim/automation';
-import { businessPortfolioSummary, businessViews } from '../../sim/businesses';
+import { businessCatalogue, businessPortfolioSummary, businessViews } from '../../sim/businesses';
 import { combatView } from '../../sim/combat';
 import { candidateViews, crewSummary, employeeViews, payrollForecast, spanOfControl } from '../../sim/crew';
 import { cryptoMarketView, cryptoPortfolioRisk, listExchanges, rigCatalogue } from '../../sim/crypto';
@@ -25,11 +25,18 @@ import { factionInterestSummary, factionOverview, factionViews } from '../../sim
 import { inventorySummary } from '../../sim/inventory';
 import { logisticsView, shipmentViews, vehicleListings } from '../../sim/logistics';
 import { locationMarketSummary, marketRows, type MarketListOptions } from '../../sim/markets';
+import { getCommodityRegistry } from '../../engine/registry';
 import { missionBoard } from '../../sim/missions';
-import { progressionSummary } from '../../sim/progression';
+import { achievementProgress, canLearnSkill, canTakePerk, progressionSummary, respecCost } from '../../sim/progression';
+import { PERKS, SKILLS } from '../../engine/registry/people';
 import { propertyListings, propertyPortfolioSummary, propertyViews } from '../../sim/properties';
 import { portfolioRisk, stockMarketView } from '../../sim/stocks';
-import { journeyView } from '../../sim/travel';
+import { availableModes, destinationList, journeyView, planTravel } from '../../sim/travel';
+import { availableRecipes, bufferSummary, lineViews, supplyChainSummary } from '../../sim/production';
+import { getWorldRegistry } from '../../engine/registry';
+import { computeNetWorth } from '../../sim/state';
+import { BALANCE } from '../../config/balance';
+import type { TravelMode } from '../../sim/types';
 import { darknetListings, darknetMarketViews, undergroundView } from '../../sim/underground';
 import { computeIndicators } from '../../sim/world';
 import { DTO_LIMITS, publicPlayer, publicTransaction, worldDto } from '../dto';
@@ -42,10 +49,21 @@ function str(params: ViewParams, key: string): string | undefined {
   return value ? value.slice(0, 64) : undefined;
 }
 
+/**
+ * Read an integer query parameter.
+ *
+ * A missing (or blank) parameter must fall back: `Number(null)` is `0`, which is
+ * finite, so a naive implementation silently clamps every defaulted limit down to
+ * its minimum — `?limit` absent meant one row on the market, the ledger, the stock
+ * list and a *zero-length* notification tail on the profile. Treating absence as
+ * absence is the only correct reading, and `tests/api.test.ts` pins it.
+ */
 function int(params: ViewParams, key: string, fallback: number, min: number, max: number): number {
-  const raw = Number(params.get(key));
-  if (!Number.isFinite(raw)) return fallback;
-  return Math.min(max, Math.max(min, Math.floor(raw)));
+  const raw = params.get(key);
+  if (raw === null || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(value)));
 }
 
 function bool(params: ViewParams, key: string): boolean | undefined {
@@ -102,6 +120,38 @@ export const VIEWS: Record<string, ViewDefinition> = {
         locationId,
         rows: marketRows(state, locationId, options),
         summary: locationMarketSummary(state, locationId),
+      };
+    },
+  },
+
+  location: {
+    description: 'Where the player stands: the location profile, its services, its laws and its local market conditions.',
+    params: ['locationId'],
+    build: (state, params, ctx) => {
+      const id = str(params, 'locationId') ?? ctx.locationId;
+      const def = getWorldRegistry().location(id);
+      if (!def) return null;
+      const live = state.world.locations[id];
+      return {
+        id: def.id,
+        name: def.name,
+        country: def.countryName,
+        region: def.regionName,
+        kind: def.kind,
+        description: def.description,
+        map: def.map,
+        population: def.population,
+        economy: def.economy,
+        security: def.security,
+        risk: def.risk,
+        laws: def.laws,
+        services: def.financialServices,
+        specialties: def.specialties.map((sid) => ({ id: sid, name: getCommodityRegistry().get(sid)?.name ?? sid })),
+        isCurrent: id === state.player.locationId,
+        lockdown: live?.lockdown ?? false,
+        playerHeat: live?.playerHeat ?? 0,
+        discovered: !def.hidden || (live?.discovered ?? false),
+        market: locationMarketSummary(state, id),
       };
     },
   },
@@ -207,13 +257,156 @@ export const VIEWS: Record<string, ViewDefinition> = {
   },
 
   progression: {
-    description: 'Level, XP, skills, perks, titles, achievements and prestige state.',
-    build: (state) => progressionSummary(state),
+    description: 'Level, XP, skills, perks, titles, achievements and prestige state, with the learnable catalogue.',
+    build: (state) => {
+      const summary = progressionSummary(state);
+      const learned = new Map(summary.skills.map((s) => [s.id, s.level]));
+      const taken = new Set(summary.perks.map((p) => p.id));
+      const cfg = BALANCE.progression.prestige;
+      return {
+        ...summary,
+        // The catalogue carries the server's own verdict (`canLearnSkill` / `canTakePerk`)
+        // so the UI never has to re-implement a prerequisite rule to grey out a button.
+        skillCatalogue: SKILLS.map((def) => {
+          const check = canLearnSkill(state, def.id);
+          return {
+            id: def.id,
+            name: def.name,
+            description: def.description,
+            tree: def.tree,
+            maxLevel: def.maxLevel,
+            level: learned.get(def.id) ?? 0,
+            effectPerLevel: def.effectPerLevel,
+            prerequisites: def.prerequisites.map((pre) => ({ skillId: pre.skillId, level: pre.level })),
+            canLearn: check.ok,
+            reason: check.reason ?? null,
+          };
+        }),
+        perkCatalogue: PERKS.map((def) => ({
+          id: def.id,
+          name: def.name,
+          description: def.description,
+          tree: def.tree,
+          modifiers: def.modifiers,
+          requiresSkillId: def.requiresSkill?.skillId ?? null,
+          requiresSkillLevel: def.requiresSkill?.level ?? null,
+          taken: taken.has(def.id),
+          canTake: canTakePerk(state, def.id).ok,
+          reason: canTakePerk(state, def.id).reason ?? null,
+        })),
+        achievements: achievementProgress(state),
+        respecCost: respecCost(state),
+        // Facts and configured thresholds, never a client-side eligibility decision:
+        // the handover itself is validated by the `progression.prestige` intent.
+        prestigeFacts: {
+          count: summary.prestigeCount,
+          lastPrestigeDay: state.player.progression.lastPrestigeDay,
+          day: state.world.day,
+          legacyBonus: summary.legacyBonus,
+          legacyBonusCap: cfg.legacyBonusCap,
+          maxPrestiges: cfg.maxPrestiges,
+          minDaysBetween: cfg.minDaysBetween,
+          netWorthRequirement: cfg.netWorthRequirement,
+          requireDebtsSettled: cfg.requireDebtsSettled,
+          netWorth: computeNetWorth(state).total,
+          outstandingDebt: state.player.loans.reduce((sum, loan) => sum + loan.balance, 0),
+        },
+      };
+    },
+  },
+
+  destinations: {
+    description: 'The world graph as the player knows it: map nodes, route edges, priced destinations and the mode picker.',
+    params: ['mode', 'search', 'toId', 'limit'],
+    build: (state, params, ctx) => {
+      const registry = getWorldRegistry();
+      const mode = (str(params, 'mode') as TravelMode | undefined) ?? 'bus';
+      const search = str(params, 'search');
+      const toId = str(params, 'toId');
+      const limit = int(params, 'limit', 0, 0, 200);
+      // `travelling` is what the player already knows about; hidden locations only appear
+      // once discovered, so the map never reveals a route the character has not found.
+      const discoveries = state.world.locations;
+      const known = (id: string): boolean => {
+        const def = registry.location(id);
+        if (!def || !def.hidden) return true;
+        return discoveries[id]?.discovered ?? false;
+      };
+      const nodes = registry.locations
+        .filter((l) => known(l.id))
+        .map((l) => ({
+          id: l.id,
+          name: l.name,
+          country: l.countryName,
+          region: l.regionName,
+          kind: l.kind,
+          map: l.map,
+          here: l.id === state.player.locationId,
+          traded: l.tradedCommodityIds.length,
+          lockdown: discoveries[l.id]?.lockdown ?? false,
+          services: {
+            bank: l.financialServices.bank,
+            stockExchange: l.financialServices.stockExchange,
+            cryptoExchange: l.financialServices.cryptoExchange,
+            darknetAccess: l.financialServices.darknetAccess,
+            loanSharks: l.financialServices.loanSharks,
+            auctionHouse: l.financialServices.auctionHouse,
+            offshore: l.financialServices.offshore,
+          },
+        }));
+      const knownSet = new Set(nodes.map((n) => n.id));
+      const edges = registry.routes
+        .filter((r) => knownSet.has(r.from) && knownSet.has(r.to))
+        .map((r) => ({
+          id: r.id,
+          from: r.from,
+          to: r.to,
+          distanceKm: r.distanceKm,
+          risk: r.baseRisk,
+          borderCrossing: r.borderCrossing,
+          customsIntensity: r.customsIntensity,
+          modes: r.modes,
+        }));
+      const destinations = destinationList(state, { mode, ...(search ? { search } : {}), ...(limit ? { limit } : {}) });
+      const plan = toId ? planFor(state, toId, mode) : null;
+      return {
+        from: ctx.locationId,
+        fromName: registry.location(ctx.locationId)?.name ?? ctx.locationId,
+        mode,
+        unchartedLocations: registry.locations.length - nodes.length,
+        nodes,
+        edges,
+        destinations,
+        modes: toId ? availableModes(state, toId) : [],
+        plan,
+      };
+    },
   },
 
   businesses: {
-    description: 'Owned businesses with their daily result, plus the portfolio summary.',
-    build: (state) => ({ businesses: businessViews(state), portfolio: businessPortfolioSummary(state) }),
+    description: 'Owned businesses with their daily result, the portfolio summary and the local franchise catalogue.',
+    params: ['locationId'],
+    build: (state, params, ctx) => ({
+      businesses: businessViews(state),
+      portfolio: businessPortfolioSummary(state),
+      catalogue: businessCatalogue(state, str(params, 'locationId') ?? ctx.locationId),
+    }),
+  },
+
+  production: {
+    description: 'Production lines, their supply chain and buffers, and the recipes installable at a location.',
+    params: ['locationId', 'onlyInstallable'],
+    build: (state, params, ctx) => {
+      const locationId = str(params, 'locationId') ?? ctx.locationId;
+      const onlyInstallable = bool(params, 'onlyInstallable');
+      return {
+        locationId,
+        lines: lineViews(state),
+        supplyChain: supplyChainSummary(state),
+        buffers: bufferSummary(state),
+        recipes: availableRecipes(state, { locationId, ...(onlyInstallable === undefined ? {} : { onlyInstallable }) }),
+      };
+    },
   },
 
   properties: {
@@ -285,6 +478,18 @@ export const VIEWS: Record<string, ViewDefinition> = {
     },
   },
 };
+
+/**
+ * A full travel plan for one destination, or `null` when it cannot be built.
+ *
+ * `planTravel` is pure and returns a structured refusal (`ok:false` + reason) for an
+ * impossible route, so the refusal travels to the client as data rather than as an
+ * error — the travel screen needs to *show* why a destination is out of reach.
+ */
+function planFor(state: GameState, toId: string, mode: TravelMode): ReturnType<typeof planTravel> | null {
+  if (!getWorldRegistry().location(toId)) return null;
+  return planTravel(state, toId, mode);
+}
 
 export type ViewName = keyof typeof VIEWS;
 

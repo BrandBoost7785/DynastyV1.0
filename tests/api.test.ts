@@ -889,3 +889,136 @@ describe('save lifecycle', () => {
     expect(gone.status).toBe(404);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* Regression — a missing `limit` is an absence, not a zero            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `Number(null)` is `0`, and `0` is finite, so a naive parameter helper read every
+ * *absent* limit as an explicit zero and clamped it up to the minimum: the market
+ * answered with a single row, the ledger with one record, the stock board with one
+ * company and the profile with a *zero-length* notification tail. These tests drive the
+ * real routes and pin the corrected reading — absence means "the view's own default".
+ */
+describe('view pagination defaults', () => {
+  /** Read one view through the real handler and return just its payload. */
+  async function payload<T>(user: TestUser, game: TestGame, name: string, query = ''): Promise<T> {
+    const result = await invoke<{ data: T }>(viewGet as unknown as RouteHandler, `/api/games/${game.gameId}/views/${name}${query}`, {
+      cookie: user.cookie,
+      params: { gameId: game.gameId, view: name },
+    });
+    expect(result.status, `${name}${query}`).toBe(200);
+    return result.body.data!.data;
+  }
+
+  it('reads an absent, blank or malformed limit as the view default', async () => {
+    const user = await newUser();
+    const game = await newGame(user);
+
+    const rows = await payload<{ rows: { commodityId: string }[] }>(user, game, 'market');
+    // The defect returned exactly one row here.
+    expect(rows.rows.length).toBeGreaterThan(1);
+    const pageSize = rows.rows.length;
+
+    for (const query of ['?limit=', '?limit=abc', '?limit=%20%20', '?limit=null']) {
+      const result = await payload<{ rows: unknown[] }>(user, game, 'market', query);
+      expect(result.rows.length, `market ${query} should fall back to the default`).toBe(pageSize);
+    }
+  });
+
+  it('honours an explicit limit and clamps junk instead of trusting it', async () => {
+    const user = await newUser();
+    const game = await newGame(user);
+
+    expect((await payload<{ rows: unknown[] }>(user, game, 'market', '?limit=1')).rows.length).toBe(1);
+    expect((await payload<{ rows: unknown[] }>(user, game, 'market', '?limit=2')).rows.length).toBe(2);
+
+    // A fraction floors rather than confusing the slice.
+    expect((await payload<{ rows: unknown[] }>(user, game, 'market', '?limit=2.9')).rows.length).toBe(2);
+
+    // A negative limit is clamped up to the minimum: it must never slice from the end.
+    expect((await payload<{ rows: unknown[] }>(user, game, 'market', '?limit=-4')).rows.length).toBe(1);
+
+    // An absurd limit is clamped to the documented ceiling without an error.
+    const huge = await payload<{ rows: unknown[] }>(user, game, 'market', '?limit=99999');
+    expect(huge.rows.length).toBeLessThanOrEqual(400);
+  });
+
+  it('keeps the stock board whole by default and paginates it on request', async () => {
+    const user = await newUser();
+    const game = await newGame(user);
+
+    const all = await payload<{ market: { all: unknown[] } }>(user, game, 'stocks');
+    expect(all.market.all.length).toBeGreaterThan(1);
+
+    const ten = await payload<{ market: { all: unknown[] } }>(user, game, 'stocks', '?limit=10');
+    expect(ten.market.all.length).toBe(10);
+
+    const junk = await payload<{ market: { all: unknown[] } }>(user, game, 'stocks', '?limit=nonsense');
+    expect(junk.market.all.length).toBe(all.market.all.length);
+  });
+
+  it('treats the destination limit as "no limit" when absent and as a cap when given', async () => {
+    const user = await newUser();
+    const game = await newGame(user);
+
+    const all = await payload<{ destinations: unknown[] }>(user, game, 'destinations');
+    expect(all.destinations.length).toBeGreaterThan(3);
+
+    // Zero is the view's own way of saying "everything", not "nothing".
+    const zero = await payload<{ destinations: unknown[] }>(user, game, 'destinations', '?limit=0');
+    expect(zero.destinations.length).toBe(all.destinations.length);
+
+    expect((await payload<{ destinations: unknown[] }>(user, game, 'destinations', '?limit=3')).destinations.length).toBe(3);
+    expect((await payload<{ destinations: unknown[] }>(user, game, 'destinations', '?limit=abc')).destinations.length).toBe(all.destinations.length);
+  });
+
+  it('paginates the ledger from the newest end with the documented default', async () => {
+    const user = await newUser();
+    const game = await newGame(user);
+    // Two trades give the ledger something to page: each write appends one record.
+    let version = game.state.meta.version;
+    for (const requestId of ['ledger-seed-a', 'ledger-seed-b']) {
+      const bought = await invoke<{ meta: { version: number } }>(intentPost as unknown as RouteHandler, `/api/games/${game.gameId}/intent`, {
+        method: 'POST',
+        cookie: user.cookie,
+        params: { gameId: game.gameId },
+        body: { intent: { type: 'trade.buy', commodityId: starterCommodity(game), qty: 1 }, expectedVersion: version, requestId },
+      });
+      expect(bought.status).toBe(200);
+      version = bought.body.data!.meta.version;
+    }
+
+    const fallback = await payload<{ total: number; rows: { id: string }[] }>(user, game, 'ledger');
+    expect(fallback.rows.length).toBe(Math.min(50, fallback.total));
+    expect(fallback.rows.length).toBeGreaterThan(1);
+
+    const one = await payload<{ rows: { id: string }[] }>(user, game, 'ledger', '?limit=1');
+    expect(one.rows.length).toBe(1);
+    // Newest last: a single-row page is the tail of the default page, not its head.
+    expect(one.rows[0]!.id).toBe(fallback.rows[fallback.rows.length - 1]!.id);
+
+    expect((await payload<{ rows: unknown[] }>(user, game, 'ledger', '?limit=abc')).rows.length).toBe(fallback.rows.length);
+    expect((await payload<{ rows: unknown[] }>(user, game, 'ledger', '?limit=-3')).rows.length).toBe(1);
+  });
+
+  it('does not truncate the notification tail to zero when the parameter is absent', async () => {
+    const user = await newUser();
+    const game = await newGame(user);
+
+    // A brand-new save opens with a notice from the world; the defect hid it entirely.
+    const fallback = await payload<{ player: { notifications: { id: string }[] } }>(user, game, 'profile');
+    expect(fallback.player.notifications.length).toBeGreaterThan(0);
+
+    const blank = await payload<{ player: { notifications: unknown[] } }>(user, game, 'profile', '?notifications=');
+    expect(blank.player.notifications.length).toBe(fallback.player.notifications.length);
+
+    const junk = await payload<{ player: { notifications: unknown[] } }>(user, game, 'profile', '?notifications=many');
+    expect(junk.player.notifications.length).toBe(fallback.player.notifications.length);
+
+    // Zero is an explicit request: it means none, not the default.
+    expect((await payload<{ player: { notifications: unknown[] } }>(user, game, 'profile', '?notifications=0')).player.notifications.length).toBe(0);
+    expect((await payload<{ player: { notifications: unknown[] } }>(user, game, 'profile', '?notifications=1')).player.notifications.length).toBe(1);
+  });
+});
