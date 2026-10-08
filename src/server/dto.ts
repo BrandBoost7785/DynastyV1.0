@@ -26,6 +26,7 @@
  */
 import { computeNetWorth, type NetWorthBreakdown } from '../sim/state';
 import type { DayReport, MultiDayReport } from '../sim/tick';
+import type { TradeNetworkView } from '../sim/trade-network';
 import type {
   ActiveEvent,
   ActionResult,
@@ -276,6 +277,49 @@ export function publicEvent(event: ActiveEvent): PublicActiveEvent {
   // unpublished event mechanics, so it stays server-side.
   const { payload: _payload, ...rest } = event;
   return { ...rest, appliedEffects: [...rest.appliedEffects] };
+}
+
+/**
+ * Public projection of the rival trade network.
+ *
+ * The simulation's own view carries each agent's working capital, realised profit
+ * and loss count — competitive state a player must not be able to read off a
+ * response, because it would reveal exactly how much a rival can bid and therefore
+ * what it will pay for the player's next cargo. What a shipper *could* observe in
+ * the world is what stays: who is moving what, between where, how much, on which
+ * route and when it lands.
+ *
+ * Absent by construction rather than by deny-listing, so rendering this view can
+ * never widen what leaks.
+ */
+export function publicTradeNetwork(view: TradeNetworkView | null): {
+  asOfDay: number;
+  agents: number;
+  activeAgents: number;
+  inTransit: number;
+  dispatchedLast30Days: number;
+  landedLast30Days: number;
+  flows: Omit<TradeNetworkView['flows'][number], 'agentId'>[];
+  routes: TradeNetworkView['routes'];
+} | null {
+  if (!view) return null;
+  return {
+    asOfDay: view.asOfDay,
+    agents: view.agents,
+    activeAgents: view.activeAgents,
+    inTransit: view.inTransit,
+    /*
+     * Lifetime totals are intentionally not exposed: cumulative profit is a
+     * rival's balance sheet by another name. The 30-day activity counts describe
+     * traffic, which is what a market participant can actually see.
+     */
+    dispatchedLast30Days: view.dispatchedLast30Days,
+    landedLast30Days: view.landedLast30Days,
+    // `agentId` is internal identity (it keys the competitor record); the firm's
+    // *name* is what a market participant would know, so that is what travels.
+    flows: view.flows.map(({ agentId: _agentId, ...rest }) => rest),
+    routes: view.routes,
+  };
 }
 
 export function worldDto(state: GameState): WorldDto {

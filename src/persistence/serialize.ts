@@ -17,6 +17,7 @@
 import { getBalance } from '../config/balance';
 import { canonicalJson, digestHex } from '../lib/hash';
 import { adoptLegacyTransactionLedger, computeNetWorth, empireScore, validateState, verifyTransactionChain } from '../sim/state';
+import { adoptTradeNetwork } from '../sim/trade-network';
 import type { GameState, ID, PlayerState, ProgressionState, TransactionChainState, TransactionRecord } from '../sim/types';
 import { err, ok, type SaveMetadata, type StoreResult } from './types';
 
@@ -148,7 +149,22 @@ export function deserializeState(json: string, opts: DeserializeOptions = {}): S
   return finishLoad(candidate as GameState, opts);
 }
 
-function finishLoad(state: GameState, opts: DeserializeOptions): StoreResult<GameState> {
+/**
+ * Fill in state a newer build expects but an older save cannot contain.
+ *
+ * Each entry is deterministic and derived only from data the save already holds,
+ * so adopting it on load yields exactly the state the game would have had if the
+ * feature had always existed. Nothing here invents money, inventory or history.
+ */
+function adoptMissingState(state: GameState): GameState {
+  if (state.world && !state.world.tradeNetwork) {
+    return { ...state, world: { ...state.world, tradeNetwork: adoptTradeNetwork(state.world) } };
+  }
+  return state;
+}
+
+function finishLoad(raw: GameState, opts: DeserializeOptions): StoreResult<GameState> {
+  const state = adoptMissingState(raw);
   if (opts.validate === false) return ok(state);
   const issues = validateState(state).filter((issue) => issue.severity === 'error');
   if (issues.length > 0) {
@@ -185,7 +201,7 @@ export function migrateState(state: GameState, fromVersion: number): StoreResult
         return err('validation_failed', `No migration path from schema version ${v} to ${CURRENT_SCHEMA_VERSION}.`);
     }
   }
-  current = { ...current, schemaVersion: CURRENT_SCHEMA_VERSION };
+  current = adoptMissingState({ ...current, schemaVersion: CURRENT_SCHEMA_VERSION });
   return ok(current);
 }
 

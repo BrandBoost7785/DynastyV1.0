@@ -522,6 +522,39 @@ export interface VehicleListing {
   description: string;
 }
 
+/**
+ * Rival cargo visible to a shipper: who is moving what, between where, how much and
+ * when it lands. Working capital, realised profit and internal scanning are withheld
+ * server-side — a competitor's balance sheet is not observable, its traffic is.
+ */
+export interface RivalTradeView {
+  asOfDay: number;
+  agents: number;
+  activeAgents: number;
+  inTransit: number;
+  dispatchedLast30Days: number;
+  landedLast30Days: number;
+  flows: {
+    id: string;
+    agentName: string;
+    commodityId: string;
+    commodityName: string;
+    fromName: string;
+    toName: string;
+    mode: string;
+    qty: number;
+    unitCost: number;
+    notionalValue: number;
+    dispatchedDay: number;
+    arrivesDay: number;
+    daysRemaining: number;
+    status: 'in_transit' | 'delivered' | 'lost';
+    risk: number;
+    detail: string | null;
+  }[];
+  routes: { routeId: string; commodityId: string; originId: string; destinationId: string; fromName: string; toName: string; inTransitQty: number; dispatches: number; landedQty: number; lostQty: number; risk: number }[];
+}
+
 export interface LogisticsView {
   view: {
     shipments: ShipmentView[];
@@ -559,6 +592,7 @@ export interface LogisticsView {
   };
   shipments: ShipmentView[];
   listings: VehicleListing[];
+  rival: RivalTradeView | null;
 }
 
 export interface PropertyOwned {

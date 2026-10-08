@@ -285,88 +285,96 @@ export interface FundamentalBreakdown {
  * Returns a breakdown so the UI can explain *why* a price is what it is
  * (spec §40).
  */
-export function computeFundamental(ctx: FundamentalContext): FundamentalBreakdown {
+export function computeFundamental(ctx: FundamentalContext, opts: { withComponents?: boolean } = {}): FundamentalBreakdown {
   const { location, commodity: c, world, day, locationState } = ctx;
+  const withComponents = opts.withComponents !== false;
   const components: FundamentalBreakdown['components'] = [];
 
   let price = c.baseValue;
-  components.push({ label: 'Base value', value: c.baseValue, kind: 'regional' });
+  if (withComponents) components.push({ label: 'Base value', value: c.baseValue, kind: 'regional' });
 
   const regional = c.regionalPreference[location.regionId] ?? 1;
   price *= regional;
-  components.push({ label: `${location.regionName} preference`, value: regional, kind: 'regional' });
+  if (withComponents) components.push({ label: `${location.regionName} preference`, value: regional, kind: 'regional' });
 
   const costOfLiving = Math.pow(location.costOfLivingIndex, 0.55);
   price *= costOfLiving;
-  components.push({ label: 'Local cost level', value: costOfLiving, kind: 'regional' });
+  if (withComponents) components.push({ label: 'Local cost level', value: costOfLiving, kind: 'regional' });
 
   const wealth = 0.85 + location.economy.wealthIndex * 0.35;
   price *= wealth;
-  components.push({ label: 'Local wealth', value: wealth, kind: 'demand' });
+  if (withComponents) components.push({ label: 'Local wealth', value: wealth, kind: 'demand' });
 
   const demandProfile = location.demandProfile[c.category] ?? 1;
   price *= Math.pow(demandProfile, 0.45);
-  components.push({ label: 'Category demand', value: Math.pow(demandProfile, 0.45), kind: 'demand' });
+  if (withComponents) components.push({ label: 'Category demand', value: Math.pow(demandProfile, 0.45), kind: 'demand' });
 
   const specialty = location.specialties.includes(c.id) ? 0.74 : 1;
   if (specialty !== 1) {
     price *= specialty;
-    components.push({ label: 'Local specialisation (cheap supply)', value: specialty, kind: 'supply' });
+    if (withComponents) components.push({ label: 'Local specialisation (cheap supply)', value: specialty, kind: 'supply' });
   }
 
   const legality = legalityPremium(location, c);
   if (legality !== 1) {
     price *= legality;
-    components.push({ label: 'Illegality premium', value: legality, kind: 'regional' });
+    if (withComponents) components.push({ label: 'Illegality premium', value: legality, kind: 'regional' });
   }
 
   const inflation = world.inflationIndex;
   price *= inflation;
-  components.push({ label: 'Inflation', value: inflation, kind: 'inflation' });
+  if (withComponents) components.push({ label: 'Inflation', value: inflation, kind: 'inflation' });
 
   const cycle = world.cycleFactor;
   price *= cycle;
-  components.push({ label: 'Economic cycle', value: cycle, kind: 'cycle' });
+  if (withComponents) components.push({ label: 'Economic cycle', value: cycle, kind: 'cycle' });
 
   const seasonal = seasonalFactor(c, location, day);
   price *= seasonal;
-  components.push({ label: 'Seasonality', value: seasonal, kind: 'cycle' });
+  if (withComponents) components.push({ label: 'Seasonality', value: seasonal, kind: 'cycle' });
 
   const trend = structuralTrend(c, day);
   price *= trend;
-  components.push({ label: 'Long-run trend', value: trend, kind: 'cycle' });
+  if (withComponents) components.push({ label: 'Long-run trend', value: trend, kind: 'cycle' });
 
   const shock = shockMultiplier(world, location, c, day);
   if (shock.factor !== 1) {
     price *= shock.factor;
-    components.push({ label: 'Active shocks', value: shock.factor, kind: 'shock' });
+    if (withComponents) components.push({ label: 'Active shocks', value: shock.factor, kind: 'shock' });
   }
 
   const priceLevel = locationState?.priceLevel ?? 1;
   if (priceLevel !== 1) {
     price *= priceLevel;
-    components.push({ label: 'Local price level', value: priceLevel, kind: 'regional' });
+    if (withComponents) components.push({ label: 'Local price level', value: priceLevel, kind: 'regional' });
   }
 
   const government = world.governments[location.countryId];
   if (government) {
     const taxEffect = 1 + government.taxRate * 0.35;
     price *= taxEffect;
-    components.push({ label: 'National tax regime', value: taxEffect, kind: 'regional' });
+    if (withComponents) components.push({ label: 'National tax regime', value: taxEffect, kind: 'regional' });
   }
 
   const political = ctx.political ?? factionMarketPressure(world, location.id);
   if (political.priceMultiplier !== 1) {
     price *= political.priceMultiplier;
-    components.push({ label: 'Faction control and conflict', value: political.priceMultiplier, kind: 'event' });
+    if (withComponents) components.push({ label: 'Faction control and conflict', value: political.priceMultiplier, kind: 'event' });
   }
 
   return { price: Math.max(0.01, price), components };
 }
 
-/** Convenience: fundamental price only. */
+/**
+ * Convenience: fundamental price only.
+ *
+ * Skips the component list. `stepMarket` needs the *number* for every market every
+ * day and never the explanation, and building a dozen throwaway objects per market
+ * per day was measurable GC pressure in a 900-market world. The multiplication
+ * order is untouched, so the value is bit-for-bit the same.
+ */
 export function fundamentalPrice(ctx: FundamentalContext): number {
-  return computeFundamental(ctx).price;
+  return computeFundamental(ctx, { withComponents: false }).price;
 }
 
 /* ------------------------------------------------------------------ */
@@ -392,6 +400,13 @@ export interface MarketContext {
    * most expensive thing the economy did.
    */
   political?: Map<ID, FactionMarketPressure>;
+  /**
+   * In-transit NPC cargo per market key, built once per step.
+   *
+   * Same reasoning as `political`: every consumer needs the same answer, and
+   * scanning the flow list per market would make the economy O(markets × flows).
+   */
+  flows?: Map<string, { inbound: number; outbound: number }>;
 }
 
 /** Political pressure for every location on the map, computed in one pass. */
@@ -415,7 +430,8 @@ export function createMarketState(
   if (!location || !commodity) return null;
 
   const locationState = ctx.locationStates.get(locationId);
-  const fundamental = fundamentalPrice({ location, locationState, commodity, world: ctx.world, day });
+  const political = ctx.political?.get(locationId);
+  const fundamental = fundamentalPrice({ location, locationState, commodity, world: ctx.world, day, political });
   const supply = baseSupplyUnits(location, commodity);
   const demand = baseDemandUnits(location, commodity, ctx.world, locationState);
   const rng = new Rng(`mkt-init:${locationId}:${commodityId}:${day}`, 'market-init');
@@ -432,7 +448,7 @@ export function createMarketState(
   const backDays = Math.min(30, B.market.historyLengthDays);
   for (let i = backDays; i >= 1; i--) {
     const d = day - i;
-    const pastFundamental = fundamentalPrice({ location, locationState, commodity, world: ctx.world, day: d });
+    const pastFundamental = fundamentalPrice({ location, locationState, commodity, world: ctx.world, day: d, political });
     const n = noiseRng(locationId, commodityId, d);
     const wobble = 1 + n.gaussian(0, commodity.volatility * 0.6);
     history.push(round2(clamp(pastFundamental * wobble, pastFundamental * B.market.priceFloorFraction, pastFundamental * B.market.priceCeilingMultiple)));
@@ -528,7 +544,20 @@ export function stepMarket(market: MarketState, ctx: MarketContext, day: number)
   if (!location || !commodity) return { market, drivers: [] };
 
   const locationState = ctx.locationStates.get(market.locationId);
-  const fundamental = fundamentalPrice({ location, locationState, commodity, world: ctx.world, day });
+  /*
+   * Pass the tick's political index rather than letting `fundamentalPrice` fall
+   * back to `factionMarketPressure`. Without it, every market re-scaned every
+   * faction's territory on every day — an O(markets × factions) loop that profiled
+   * as the single hottest thing the simulation did. The value is identical.
+   */
+  const fundamental = fundamentalPrice({
+    location,
+    locationState,
+    commodity,
+    world: ctx.world,
+    day,
+    political: ctx.political?.get(location.id),
+  });
   const baseSupply = baseSupplyUnits(location, commodity);
   const baseDemand = baseDemandUnits(location, commodity, ctx.world, locationState);
   const drivers: PriceDriver[] = [];
@@ -541,8 +570,24 @@ export function stepMarket(market: MarketState, ctx: MarketContext, day: number)
   const priceSensitivity = Math.pow(clamp(priceRatio, 0.25, 4), -commodity.elasticity);
   const consumption = Math.min(market.supply, baseDemand * priceSensitivity * B.economy.npcDemandDrainPerDay * rng.float(0.7, 1.3));
   const replenish = (baseSupply - market.supply) * B.economy.supplyReplenishPerDay * rng.float(0.75, 1.25);
+  /*
+   * Producer response — the supply half of the loop.
+   *
+   * Elastic demand alone lets a spike decay from the demand side, but nothing ever
+   * *answers* a shortage: no additional units appear, so a genuine dislocation lasts
+   * until mean reversion grinds it away, and two locations can hold permanently
+   * different prices with no force between them. Here producers and carriers supply
+   * more when price sits above fundamental and withhold when it sits below, which is
+   * what makes scarcity self-correcting and what gives arbitrage a natural expiry.
+   * The response is proportional, symmetric and hard-capped per day.
+   */
+  const supplyResponse = clamp(
+    (priceRatio - 1) * B.economy.supplyResponseElasticity * baseSupply,
+    -baseSupply * B.economy.supplyResponseCapFraction,
+    baseSupply * B.economy.supplyResponseCapFraction,
+  );
 
-  let supply = Math.max(baseSupply * 0.05, market.supply - consumption + replenish);
+  let supply = Math.max(baseSupply * 0.05, market.supply - consumption + replenish + supplyResponse);
   let demand = market.demand + (baseDemand - market.demand) * 0.18;
 
   // Competitor and faction activity perturbs local supply/demand.
@@ -551,6 +596,25 @@ export function stepMarket(market: MarketState, ctx: MarketContext, day: number)
     supply *= political.supplyMultiplier;
     demand *= political.demandMultiplier;
     drivers.push(...political.drivers);
+  }
+
+  // NPC cargo already in the water toward or away from this market. This is
+  // *announced future* supply rather than a same-day price term: the units land
+  // through `tradeImpact` on arrival. Surfacing it here is what lets the market's
+  // own explanation say "relief is coming" before the price turns.
+  const flow = ctx.flows?.get(market.key) ?? { inbound: 0, outbound: 0 };
+  if (flow.inbound > 0 || flow.outbound > 0) {
+    const scale = Math.max(1, baseSupply);
+    const contribution = (flow.outbound - flow.inbound) / scale;
+    if (Math.abs(contribution) > 0.0015) {
+      drivers.push({
+        label: flow.inbound > 0
+          ? `Cargo inbound (${flow.inbound.toLocaleString('en-US')} units)`
+          : `Cargo outbound (${flow.outbound.toLocaleString('en-US')} units)`,
+        contribution,
+        kind: 'competitor',
+      });
+    }
   }
 
   const comp = competitorPressure(ctx.world, location, commodity, ctx.competitors);
@@ -566,6 +630,14 @@ export function stepMarket(market: MarketState, ctx: MarketContext, day: number)
 
   const scarcity = clamp(Math.pow(demand / Math.max(0.01, supply), B.economy.priceElasticity), ...B.economy.scarcityClamp);
   drivers.push({ label: `Scarcity (${round2(demand)} demand / ${round2(supply)} supply)`, contribution: scarcity - 1, kind: 'supply' });
+  if (Math.abs(supplyResponse) > 0) {
+    // The response's own price contribution: more supply arriving pushes price down.
+    drivers.push({
+      label: supplyResponse > 0 ? 'Producers answering the price' : 'Producers withholding supply',
+      contribution: -supplyResponse / Math.max(1, baseSupply),
+      kind: 'supply',
+    });
+  }
 
   /* ---- deviation / impact relaxation ---- */
   let deviation = market.deviation;

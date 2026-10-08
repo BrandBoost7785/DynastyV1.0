@@ -14,6 +14,7 @@ import { getWorldRegistry } from '../engine/registry/world';
 import { getCommodityRegistry } from '../engine/registry/commodities';
 import { COUNTRIES, REGIONS } from '../engine/registry/regions';
 import { FACTIONS, FACTION_BY_ID } from '../engine/registry/actors';
+import { createTradeNetwork } from './trade-network';
 import type {
   ActiveShock,
   CommodityCategory,
@@ -143,6 +144,7 @@ export function createWorldState(seed: string, startDay = 0): WorldState {
   const governments: Record<ID, GovernmentState> = orderedRecord(governmentEntries);
 
   const competitors = createCompetitors(rng, startDay);
+  const tradeNetwork = createTradeNetwork(competitors);
 
   const world: WorldState = {
     day: startDay,
@@ -166,6 +168,7 @@ export function createWorldState(seed: string, startDay = 0): WorldState {
     companies: {},
     cryptoAssets: {},
     competitors,
+    tradeNetwork,
     governments,
     activeEvents: [],
     news: [],

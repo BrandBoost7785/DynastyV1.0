@@ -15,7 +15,7 @@ import { ViewPanel, CommandButton, QuantityPicker } from '../../../../components
 import { Badge, Button, Checkbox, Input, KeyValue, Meter, Panel, Progress, Select, Table, Tabs, Td, Th, Tr } from '../../../../components/ui/primitives';
 import { EmptyState, InlineNote } from '../../../../components/ui/states';
 import { humanise, mass, money, num, pct, shortId, volume } from '../../../../lib/format';
-import type { DestinationsView, InventoryView, LogisticsView, TravelPlan } from '../../../../lib/game-data';
+import type { DestinationsView, InventoryView, LogisticsView, RivalTradeView, TravelPlan } from '../../../../lib/game-data';
 
 type Tab = 'shipments' | 'vehicles' | 'storage' | 'dispatch';
 
@@ -178,9 +178,67 @@ function Shipments() {
               </article>
             );
           })}
+          <RivalTraffic rival={shipments.data?.rival ?? null} />
         </div>
       )}
     </ViewPanel>
+  );
+}
+
+/**
+ * Cargo rival firms have on the road right now.
+ *
+ * The simulation's own trade network lands these units in these markets on these
+ * days, so what a player reads here is what the economy will do — not a sampled or
+ * illustrative feed. What is *not* here is a rival's working capital or profit: those
+ * are server-side, and a shipper could not observe them.
+ */
+function RivalTraffic({ rival }: { rival: RivalTradeView | null }) {
+  if (!rival || rival.flows.length === 0) {
+    return (
+      <Panel title="Rival cargo" subtitle="Freight competitors have moving between markets" bodyClassName="px-4 py-3">
+        <EmptyState title="No rival cargo in transit" body="Independent firms dispatch when a route clears their margin after freight and risk. Nothing is on the road today." />
+      </Panel>
+    );
+  }
+  return (
+    <Panel title="Rival cargo" subtitle="Freight competitors have moving between markets — the units they are bringing in are supply the market will receive" bodyClassName="px-4 py-3">
+      <dl className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-4">
+        <KeyValue label="Firms trading">{`${rival.activeAgents} of ${rival.agents}`}</KeyValue>
+        <KeyValue label="Cargo in transit">{num(rival.inTransit)}</KeyValue>
+        <KeyValue label="Dispatched (30d)">{num(rival.dispatchedLast30Days)}</KeyValue>
+        <KeyValue label="Landed (30d)">{num(rival.landedLast30Days)}</KeyValue>
+      </dl>
+      <div className="mt-3 overflow-x-auto">
+        <Table label="Rival cargo in transit">
+          <thead>
+            <tr>
+              <Th>Firm</Th>
+              <Th>Goods</Th>
+              <Th>Lane</Th>
+              <Th align="right">Qty</Th>
+              <Th align="right">Lands</Th>
+              <Th>Status</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {rival.flows.map((flow) => (
+              <Tr key={flow.id}>
+                <Td>{flow.agentName}</Td>
+                <Td>{flow.commodityName}</Td>
+                <Td>{`${flow.fromName} → ${flow.toName}`}</Td>
+                <Td align="right" className="tnum">{num(flow.qty)}</Td>
+                <Td align="right" className="tnum">{flow.daysRemaining === 0 ? 'today' : `day ${flow.arrivesDay}`}</Td>
+                <Td>
+                  {flow.risk >= 0.5 ? <Badge tone="warn">{`risk ${pct(flow.risk, { decimals: 0 })}`}</Badge> : <Badge tone="info">in transit</Badge>}
+                </Td>
+              </Tr>
+            ))}
+          </tbody>
+        </Table>
+      </div>
+      <InlineNote>Arrivals add units to the destination market, which presses its price down — the same impact rule your own sales follow.</InlineNote>
+    </Panel>
   );
 }
 

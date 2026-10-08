@@ -35,6 +35,18 @@ export const BALANCE = {
     npcDemandDrainPerDay: 0.055,
     /** Fraction of a market's supply replenished by producers each day. */
     supplyReplenishPerDay: 0.075,
+    /**
+     * How strongly producers answer a price away from fundamental value.
+     *
+     * Demand was always elastic (`priceSensitivity`), but supply merely relaxed
+     * toward a fixed baseline, so a shortage could never attract new output and a
+     * location price gap could only ever be closed by the player. This is the
+     * supply half of the loop: `produced = (price/fundamental − 1) × elasticity × base`.
+     * Bounded per day so no single spike can summon an unbounded book.
+     */
+    supplyResponseElasticity: 0.035,
+    /** Hard cap on the daily producer response, as a fraction of baseline supply. */
+    supplyResponseCapFraction: 0.06,
     /** How strongly a supply/demand imbalance moves price (elasticity). */
     priceElasticity: 0.62,
     scarcityClamp: [0.35, 3.2] as [number, number],
@@ -138,6 +150,81 @@ export const BALANCE = {
     },
     /** Net worth below which the campaign declares bankruptcy. */
     bankruptcyThreshold: -25000,
+  },
+
+  /**
+   * Autonomous trade network — the world's rival firms moving physical cargo.
+   *
+   * See `src/sim/trade-network.ts`. These are deliberately conservative: agents
+   * pay the player's freight rates, obey the same price-impact rule, and stop
+   * trading when they run out of money.
+   */
+  tradeNetwork: {
+    /** Share of a competitor's capital that becomes tradable working capital. */
+    capitalFraction: 0.25,
+    /**
+     * Margin an agent demands before it will move cargo, as a fraction of the
+     * purchase price. Freight, spread and route risk are already deducted, so a
+     * leg that clears this is genuinely worth a truck.
+     */
+    minMarginFraction: 0.015,
+    /**
+     * Share of an agent's working capital it will commit to a single cargo, and
+     * the share of the origin book it will clear in one go. Both keep a rival
+     * from being either a rounding error or a market-wrecking whale.
+     */
+    capitalCommitFraction: 0.5,
+    /** Most of the *origin* book one dispatch may clear. */
+    bookSharePerDispatch: 0.12,
+    /**
+     * Most of the *destination* book one dispatch is sized against. Demand is what
+     * a shipper is serving, so this is the natural scale — and it is self-limiting,
+     * because landing 20% of a book presses that market's price down, so the next
+     * shipper sees a smaller gap.
+     */
+    destinationBookShare: 0.2,
+    /** Hard ceiling on one dispatch, so scale never explodes with location count. */
+    maxUnitsPerDispatch: 8000,
+    /** Days between dispatches for one agent. */
+    dispatchCooldownDays: 1,
+    /*
+     * Chance per day that an agent looks for a trade at all.
+     *
+     * Below 1 on purpose: a scan prices every city pair the firm operates in, and it is
+     * the single most expensive thing the trade phase does. Firms that shop every other
+     * day are both cheaper to simulate and more believable than firms that re-quote the
+     * whole map daily — and the economics are unchanged, because a firm still commits
+     * its full capital budget on the days it does move.
+     */
+    dispatchChancePerDay: 0.6,
+    /** Agents stop trading below this working capital. */
+    minCapitalToTrade: 15_000,
+    /** Consecutive losses before a firm halts and its routes open up. */
+    lossesBeforeExit: 4,
+    /** Cargoes one agent may have in the air at once. */
+    maxFlowsPerAgent: 8,
+    /** Commodities sampled per focus category, per scan. */
+    commoditiesPerAgentScan: 2,
+    /** Interception chance per unit of route risk (wars close routes). */
+    interceptionPerRisk: 0.22,
+    maxInterceptionChance: 0.6,
+    /** Fraction of cargo value written off when a route's risk bites. */
+    riskLossFraction: 0.35,
+    /** A route at or above this risk carries no NPC cargo at all. */
+    maxDispatchRisk: 0.75,
+    /** Dispatches this size relative to the destination book make the news. */
+    newsWorthinessBookShare: 0.08,
+    /** Retained settled cargoes per save. */
+    flowHistory: 240,
+    /**
+     * Ceiling on how many live commodity markets the network will keep alive.
+     *
+     * Every materialised market is stepped every single day, so the network's
+     * reach is a direct cost on the whole economy. This bounds it: markets the
+     * agents actually trade stay (recent `lastTradedDay`), markets that were
+     * priced and rejected are evicted first and rematerialise when they matter.
+     */
+    liveMarketCap: 360,
   },
 
   /** Equity markets. */

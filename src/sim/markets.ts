@@ -86,7 +86,33 @@ export function marketContext(state: GameState): MarketContext {
     locationStates,
     competitors: Object.values(state.world.competitors),
     political: politicalPressureIndex(state.world, [...locations.keys()]),
+    flows: flowIndex(state),
   };
+}
+
+/**
+ * In-transit NPC cargo per market key, in one pass over the flow list.
+ *
+ * Built once per market step rather than queried per market: the number of flows
+ * is independent of the number of markets, so a per-market scan would put the
+ * economy on an O(markets × flows) path as the world scales.
+ */
+function flowIndex(state: GameState): Map<string, { inbound: number; outbound: number }> {
+  const index = new Map<string, { inbound: number; outbound: number }>();
+  const network = state.world.tradeNetwork;
+  if (!network) return index;
+  for (const flow of network.flows) {
+    if (flow.status !== 'in_transit') continue;
+    const inboundKey = marketKey(flow.destinationLocationId, flow.commodityId);
+    const outboundKey = marketKey(flow.originLocationId, flow.commodityId);
+    const inbound = index.get(inboundKey) ?? { inbound: 0, outbound: 0 };
+    inbound.inbound += flow.qty;
+    index.set(inboundKey, inbound);
+    const outbound = index.get(outboundKey) ?? { inbound: 0, outbound: 0 };
+    outbound.outbound += flow.qty;
+    index.set(outboundKey, outbound);
+  }
+  return index;
 }
 
 export function marketAt(state: GameState, locationId: ID, commodityId: ID): MarketState | undefined {
@@ -97,11 +123,16 @@ export function marketAt(state: GameState, locationId: ID, commodityId: ID): Mar
  * Materialise one market if it does not exist yet. Returns null when the
  * commodity/location pair is unknown (never for balance reasons).
  */
-export function ensureMarket(state: GameState, locationId: ID, commodityId: ID): MarketState | null {
+export function ensureMarket(state: GameState, locationId: ID, commodityId: ID, ctx?: MarketContext): MarketState | null {
   const key = marketKey(locationId, commodityId);
   const existing = state.markets[key];
   if (existing) return existing;
-  const created = createMarketState(locationId, commodityId, marketContext(state), state.world.day);
+  /*
+   * A caller that materialises many markets in one pass passes its own context.
+   * Building one per market is O(locations × factions) *per market*, which turned
+   * the NPC trade scan into the single most expensive thing the tick did.
+   */
+  const created = createMarketState(locationId, commodityId, ctx ?? marketContext(state), state.world.day);
   if (!created) return null;
   state.markets[key] = created;
   return created;
@@ -506,14 +537,49 @@ function channelFeeRate(channel: TradeChannel): { rate: number; kind: FeeLine['k
  * unexploitable at scale (spec §44 exploit resistance) while still rewarding
  * genuine scarcity trading at modest size.
  */
+/*
+ * Daily traded volume, split by who traded.
+ *
+ * `traded:<market>:<day>` is the *player's* volume: the monopoly share, the empire
+ * score and the stat panels all read it as "what this player did today". Rival firms
+ * trade the same books and must drain the same daily absorb cap, but their volume is
+ * never the player's, so it is recorded under its own prefix. `tradedToday` is the sum
+ * — the market's actual drain — and is what the cap and the player's own limit are
+ * measured against.
+ */
+const TRADED_PREFIX = 'traded:';
+const RIVAL_TRADED_PREFIX = 'rival_traded:';
+
+/** Units traded in this market today by anyone — the market's own drain. */
+export function tradedToday(state: GameState, market: MarketState): number {
+  const suffix = `${market.key}:${state.world.day}`;
+  return counter(state, `${TRADED_PREFIX}${suffix}`) + counter(state, `${RIVAL_TRADED_PREFIX}${suffix}`);
+}
+
+/** Units the player has traded in this market today. */
+export function playerTradedToday(state: GameState, market: MarketState): number {
+  return counter(state, `${TRADED_PREFIX}${market.key}:${state.world.day}`);
+}
+
+/**
+ * Record volume a rival firm traded in a market.
+ *
+ * Deliberately not `bumpCounter` on the player's key: a competitor's cargo is market
+ * activity, not the player's achievement, and conflating the two would let rival
+ * traffic satisfy the player's monopoly objective.
+ */
+export function recordRivalTrade(state: GameState, marketKey: ID, qty: number, day = state.world.day): void {
+  const key = `${RIVAL_TRADED_PREFIX}${marketKey}:${day}`;
+  setCounter(state, key, counter(state, key) + qty);
+}
+
 export function absorbableUnits(state: GameState, market: MarketState, side: 'buy' | 'sell'): number {
   const base = market.supply * ABSORB_FRACTION;
   const premium = market.fundamental > 0 ? market.price / market.fundamental - 1 : 0;
   const dislocation = side === 'sell' ? Math.max(0, premium) : Math.max(0, -premium);
   const guard = B.market.arbitrageGuardMaxMargin;
   const factor = dislocation > guard ? guard / dislocation : 1;
-  const tradedToday = counter(state, `traded:${market.key}:${state.world.day}`);
-  return Math.max(0, Math.floor(base * clamp(factor, 0.05, 1) - tradedToday));
+  return Math.max(0, Math.floor(base * clamp(factor, 0.05, 1) - tradedToday(state, market)));
 }
 
 function impactFor(market: MarketState, c: CommodityDef, qty: number, side: 'buy' | 'sell', reduction: number): number {
@@ -745,7 +811,7 @@ function buildQuote(
       affordable: Number.isFinite(affordable) ? affordable : -1,
       storable: Number.isFinite(storable) ? storable : -1,
       onHand,
-      alreadyTradedToday: counter(state, `traded:${market.key}:${state.world.day}`),
+      alreadyTradedToday: tradedToday(state, market),
     },
     permission,
     analytics: analyseMarket(market),
@@ -1207,10 +1273,12 @@ export function stepMarkets(state: GameState, rng: Rng): StepMarketsResult {
   }
 
   // Clear yesterday's per-market volume counters so the daily absorb cap resets.
-  const prefix = `traded:`;
-  const yesterday = `${day - 1}`;
+  // Both the player's and the rivals' keys: leaving either behind would make the
+  // book appear permanently drained.
+  const yesterday = `:${day - 1}`;
   for (const key of Object.keys(state.player.stats.counters)) {
-    if (key.startsWith(prefix) && key.endsWith(`:${yesterday}`)) delete state.player.stats.counters[key];
+    const perMarket = key.startsWith(TRADED_PREFIX) || key.startsWith(RIVAL_TRADED_PREFIX);
+    if (perMarket && key.endsWith(yesterday)) delete state.player.stats.counters[key];
   }
 
   movers.sort(

@@ -706,6 +706,63 @@ export interface CompetitorState {
   hostileToPlayer: boolean;
 }
 
+/**
+ * One rival firm's balance sheet and standing in the trade network.
+ *
+ * Deliberately *not* the same record as `CompetitorState`: that one is the
+ * world's coarse, regional presence (used for pressure on local books), while
+ * this is the agent that actually buys, ships and sells. Keeping them separate
+ * means a save written before Phase 3 migrates without ambiguity, and it keeps
+ * the "who is moving this cargo" question answerable by id.
+ */
+export interface TradeAgentState {
+  id: ID;
+  name: string;
+  homeLocationId: ID;
+  /** Spendable working capital. Cargo and freight are paid from here. */
+  capital: number;
+  /** Commodity categories the firm specialises in. */
+  focus: CommodityCategory[];
+  /** Locations it is willing to buy or sell in. */
+  operatingLocationIds: ID[];
+  dispatched: number;
+  delivered: number;
+  lost: number;
+  volume: number;
+  realisedProfit: number;
+  lastDispatchDay: number;
+  status: 'active' | 'insolvent';
+  /** Consecutive losing cargoes; reaching a threshold halts the firm. */
+  losses: number;
+}
+
+/** A cargo in the world: bought at origin, in transit or settled. */
+export interface TradeFlowState {
+  id: ID;
+  agentId: ID;
+  commodityId: ID;
+  originLocationId: ID;
+  destinationLocationId: ID;
+  routeId: ID;
+  mode: TravelMode;
+  qty: number;
+  /** Landed cost per unit including freight, so profit is honest. */
+  unitCost: number;
+  /** Value at the destination's price when the leg was priced. */
+  notionalValue: number;
+  dispatchedDay: number;
+  arrivesDay: number;
+  status: 'in_transit' | 'delivered' | 'lost';
+  detail: string | null;
+}
+
+export interface TradeNetworkState {
+  agents: Record<ID, TradeAgentState>;
+  flows: TradeFlowState[];
+  stats: { dispatched: number; delivered: number; lost: number; volume: number; realisedProfit: number };
+  lastScanDay: number;
+}
+
 export interface GovernmentState {
   countryId: ID;
   stability: number;
@@ -792,6 +849,11 @@ export interface WorldState {
   companies: Record<ID, CompanyState>;
   cryptoAssets: Record<ID, CryptoAssetState>;
   competitors: Record<ID, CompetitorState>;
+  /**
+   * Rival firms' physical trade. Absent on saves written before Phase 3 and
+   * adopted on load (`adoptTradeNetwork`), so every reader must handle `undefined`.
+   */
+  tradeNetwork?: TradeNetworkState;
   governments: Record<ID, GovernmentState>;
   activeEvents: ActiveEvent[];
   news: NewsItem[];

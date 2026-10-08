@@ -24,6 +24,7 @@ import { accountViews, creditScoreView, debtSummary, financeView } from '../../s
 import { factionInterestSummary, factionOverview, factionViews } from '../../sim/factions';
 import { inventorySummary } from '../../sim/inventory';
 import { logisticsView, shipmentViews, vehicleListings } from '../../sim/logistics';
+import { tradeNetworkView } from '../../sim/trade-network';
 import { locationMarketSummary, marketRows, type MarketListOptions } from '../../sim/markets';
 import { getCommodityRegistry } from '../../engine/registry';
 import { missionBoard } from '../../sim/missions';
@@ -39,7 +40,7 @@ import { BALANCE } from '../../config/balance';
 import type { TravelMode } from '../../sim/types';
 import { darknetListings, darknetMarketViews, undergroundView } from '../../sim/underground';
 import { computeIndicators } from '../../sim/world';
-import { DTO_LIMITS, publicPlayer, publicTransaction, worldDto } from '../dto';
+import { DTO_LIMITS, publicPlayer, publicTradeNetwork, publicTransaction, worldDto } from '../dto';
 
 /** Query parameters accepted by a view. Values arrive as strings and are parsed here. */
 export type ViewParams = URLSearchParams;
@@ -425,11 +426,21 @@ export const VIEWS: Record<string, ViewDefinition> = {
   },
 
   logistics: {
-    description: 'Vehicles, shipments in transit and the freight overview.',
+    description: 'Vehicles, shipments in transit, the freight overview and rival cargo on the same routes.',
     build: (state) => ({
       view: logisticsView(state),
       shipments: shipmentViews(state),
       listings: vehicleListings(state),
+      /*
+       * Rival firms' cargo, on the same routes the player uses.
+       *
+       * Deliberately the *same* view the trade-network system produces, so the
+       * number of units inbound to a market is exactly what the simulation will
+       * land — never a separate, drifting read model. What is omitted is equally
+       * deliberate: an agent's working capital, its profit and its internal scan are
+       * server-side competitive state.
+       */
+      rival: publicTradeNetwork(tradeNetworkView(state)),
     }),
   },
 

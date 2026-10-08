@@ -391,8 +391,46 @@ async function runIntent(label, body) {
   check('advance 5 days succeeds', advance.json?.data?.ok === true, JSON.stringify(advance.json?.data?.message));
   version = advance.json?.data?.meta?.version ?? version;
   check('advance moved the world clock', (advance.json?.data?.state?.world?.day ?? 0) >= 5, String(advance.json?.data?.state?.world?.day));
+  /*
+   * A requested advance runs the days it asked for, or stops for a reason it names
+   * (a fight needing a decision, or the run ending). A command that reports success
+   * while quietly running one day is a contract break: Phase 3 found one where rival
+   * cargo was booked as the player's own trade volume and tripped the monopoly
+   * objective on day 1 — the run ended and the remaining days never ran.
+   */
+  const advanceReport = advance.json?.data?.data;
+  const daysBeforeAdvance = (advance.json?.data?.state?.world?.day ?? 0) - (advanceReport?.days ?? 0);
+  check(
+    'an advance runs every day it was asked for, or says why it stopped',
+    advanceReport?.stoppedEarly === true || (advance.json?.data?.state?.world?.day ?? 0) === daysBeforeAdvance + 5,
+    JSON.stringify({ day: advance.json?.data?.state?.world?.day, ran: advanceReport?.days, stoppedEarly: advanceReport?.stoppedEarly, reason: advanceReport?.stopReason }),
+  );
   const replayAdvance = await alice('POST', `/api/games/${gameId}/advance`, { days: 5, expectedVersion: version - 1, requestId: `${stamp}-advance-5` });
   check('a replayed advance is not applied twice', replayAdvance.json?.data?.replayed === true, JSON.stringify(replayAdvance.json?.data?.replayed));
+
+  // --- rival trade network ------------------------------------------
+  /*
+   * The logistics view carries the same trade network the simulation settles from, so
+   * the traffic a player reads is what the economy will actually do — and it withholds
+   * a rival's working capital and profit, which no shipper could observe.
+   */
+  const logisticsView = await alice('GET', `/api/games/${gameId}/views/logistics`);
+  const rival = logisticsView.json?.data?.data?.rival ?? null;
+  check('logistics exposes rival cargo on the same routes', rival !== null && typeof rival === 'object', String(logisticsView.status));
+  if (rival) {
+    check('rival summary counts firms', Number.isInteger(rival.agents) && rival.agents > 0 && rival.activeAgents <= rival.agents, JSON.stringify({ agents: rival.agents, active: rival.activeAgents }));
+    check('rival summary reports traffic and arrivals', typeof rival.dispatchedLast30Days === 'number' && typeof rival.inTransit === 'number' && typeof rival.landedLast30Days === 'number', JSON.stringify({ dispatched: rival.dispatchedLast30Days, inTransit: rival.inTransit, landed: rival.landedLast30Days }));
+    check('rival traffic is reported by route, not as a single number', Array.isArray(rival.routes) && Array.isArray(rival.flows), JSON.stringify({ routes: rival.routes?.length, flows: rival.flows?.length }));
+    for (const flow of (rival.flows ?? []).slice(0, 8)) {
+      check(`rival cargo ${flow.id} names the firm and both cities`, typeof flow.agentName === 'string' && flow.agentName.length > 0 && typeof flow.fromName === 'string' && flow.fromName.length > 0 && typeof flow.toName === 'string' && flow.toName.length > 0, JSON.stringify(flow).slice(0, 160));
+      check(`rival cargo ${flow.id} carries a quantity and an arrival day`, flow.qty > 0 && Number.isFinite(flow.arrivesDay), JSON.stringify({ qty: flow.qty, arrivesDay: flow.arrivesDay }));
+      check(`rival cargo ${flow.id} withholds the internal agent id`, flow.agentId === undefined, JSON.stringify(flow).slice(0, 120));
+    }
+    const rivalRaw = JSON.stringify(rival);
+    for (const secret of ['"capital"', 'realisedProfit', 'lastDispatchDay', 'agentId', 'operatingLocationIds']) {
+      check(`rival view never exposes ${secret}`, !rivalRaw.includes(secret));
+    }
+  }
 
   // --- crew ---------------------------------------------------------
   const pool = await runIntent('crew-refresh', { type: 'crew.refresh_pool' });

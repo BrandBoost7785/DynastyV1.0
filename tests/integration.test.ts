@@ -540,3 +540,95 @@ describe('supply chains are reachable end to end', () => {
     expect(missing).toEqual([]);
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* 10. Faction conflict → route risk → rival cargo destroyed            */
+/* ------------------------------------------------------------------ */
+
+describe('faction conflict re-routes rival cargo', () => {
+  it('derives route risk from the war map, and that risk takes rival cargo', () => {
+    const worldReg = getWorldRegistry();
+    const live = funded('integration-rival-war');
+    // One day of the world tick is what derives route risk from the war map.
+    advanceDays(live, new Rng('integration-rival-war:warm', 'test'), 1);
+
+    /* 1. The war term in the world's own rule. ----------------------------- */
+    const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+    const round4 = (v: number) => Math.round(v * 1e4) / 1e4;
+    const factions = Object.values(live.world.factions);
+    const warRiskOn = (def: { from: ID; to: ID }) => {
+      let risk = 0;
+      for (const faction of factions) {
+        if (faction.atWarWith.length === 0) continue;
+        if (!faction.controlledLocationIds.includes(def.from) && !faction.controlledLocationIds.includes(def.to)) continue;
+        for (const enemyId of faction.atWarWith) {
+          const enemy = live.world.factions[enemyId];
+          if (!enemy) continue;
+          if (enemy.controlledLocationIds.includes(def.from) || enemy.controlledLocationIds.includes(def.to)) risk += 0.18;
+        }
+      }
+      return Math.min(0.5, risk);
+    };
+
+    let matched = 0;
+    let warSubsidised = 0;
+    let total = 0;
+    for (const routeState of Object.values(live.world.routes)) {
+      const def = worldReg.route(routeState.routeId);
+      if (!def) continue;
+      total += 1;
+      const from = live.world.locations[def.from];
+      const to = live.world.locations[def.to];
+      const borderBlocked = (from?.borderClosed || to?.borderClosed) ?? false;
+      const terrain = def.baseRisk * (1 + (from ? (1 - from.stability) * 0.5 : 0) + (to ? (1 - to.stability) * 0.5 : 0));
+      const war = warRiskOn(def);
+      const derived = round4(clamp(terrain + war + (borderBlocked ? 0.25 : 0) + (routeState.disrupted ? 0.12 : 0), 0.005, 0.99));
+      if (Math.abs(derived - routeState.risk) < 1e-9) matched += 1;
+      // Where an enemy pair sits on the two ends, the war alone must have added at
+      // least one step — the risk the network prices is war risk, not terrain.
+      if (war > 0 && routeState.risk - terrain >= 0.18 - 1e-9) warSubsidised += 1;
+    }
+    expect(total).toBeGreaterThan(100);
+    // The stored risk *is* the rule's output, lane by lane.
+    expect(matched).toBeGreaterThanOrEqual(total - 2);
+    expect(warSubsidised).toBeGreaterThan(0);
+
+    /* 2. What that risk does to rival cargo. ------------------------------- */
+    const network = live.world.tradeNetwork!;
+    const riskAtDispatch = new Map<ID, number>();
+    const seen = new Set<ID>();
+    for (let day = 1; day <= 120; day += 1) {
+      advanceDays(live, new Rng(`integration-rival-war:${day}`, 'test'), 1);
+      for (const flow of network.flows) {
+        if (seen.has(flow.id)) continue;
+        seen.add(flow.id);
+        riskAtDispatch.set(flow.id, live.world.routes[flow.routeId]?.risk ?? 0);
+      }
+    }
+
+    // Only cargo that has actually arrived is judged: a flow still on the road has
+    // not faced the interception roll yet.
+    const settled = network.flows.filter((f) => f.status === 'delivered' || f.status === 'lost');
+    const bucket = (risk: number) => (risk >= 0.5 ? 'war' : risk < 0.35 ? 'calm' : null);
+    const tally = { war: { n: 0, lost: 0 }, calm: { n: 0, lost: 0 } };
+    for (const flow of settled) {
+      const which = bucket(riskAtDispatch.get(flow.id) ?? 0);
+      if (!which) continue;
+      tally[which].n += 1;
+      if (flow.status === 'lost') tally[which].lost += 1;
+    }
+    expect(tally.war.n).toBeGreaterThan(20);
+    expect(tally.calm.n).toBeGreaterThan(20);
+    const warRate = tally.war.lost / tally.war.n;
+    const calmRate = tally.calm.lost / tally.calm.n;
+    // Cargo on a war corridor is materially more likely never to arrive.
+    expect(warRate).toBeGreaterThan(0.1);
+    expect(warRate).toBeGreaterThan(calmRate * 2);
+    // And loss is only ever recorded on a route that carried risk.
+    for (const flow of settled) {
+      if (flow.status !== 'lost') continue;
+      expect(live.world.routes[flow.routeId]?.risk ?? 0).toBeGreaterThan(0.15);
+    }
+    expect(validateState(live).filter((i) => i.severity === 'error')).toEqual([]);
+  });
+});

@@ -31,6 +31,7 @@ import { automationSummaryLine, automationTick, type AutomationTickResult } from
 import { crewTick, maybeRefreshHiringPool, payrollForecast, type PayrollResult } from './crew';
 import { eventTick, type EventTickResult } from './events';
 import { factionTick, type FactionTickResult } from './factions';
+import { tradeNetworkTick, tradeNetworkSummary } from './trade-network';
 import { logisticsTick, storageRentTick, type LogisticsTickResult } from './logistics';
 import { undergroundTick, type UndergroundTickResult } from './underground';
 import { stepCrypto, type CryptoStepResult } from './crypto';
@@ -180,6 +181,30 @@ export function advanceDay(state: GameState, rng: Rng, opts: AdvanceOptions = {}
       severity: marketResult.biggestMovers[0]!.change < -0.08 ? 'warning' : 'info',
     });
     publishMovers(state, marketResult.biggestMovers);
+  }
+
+  /* --------------------------- 3b. trade network -------------------------- */
+  /*
+   * Rival firms move cargo *after* the books have stepped and *before* factions,
+   * enforcement and the player's own day resolve. Deliveries land into the same
+   * market records the player trades against, so an inbound shipment is simply
+   * supply: it presses the destination price down through `tradeImpact`.
+   */
+  const tradeResult = tradeNetworkTick(state, rng);
+  if (tradeResult.dispatched > 0 || tradeResult.delivered > 0 || tradeResult.lost > 0 || tradeResult.agentFailures.length > 0) {
+    phases.push({
+      phase: 'trade',
+      system: 'trade_network',
+      summary: tradeNetworkSummary(tradeResult),
+      metrics: [
+        { label: 'Dispatched', value: String(tradeResult.dispatched) },
+        { label: 'Landed', value: String(tradeResult.delivered) },
+        { label: 'Units landed', value: tradeResult.volume.toLocaleString('en-US') },
+        { label: 'Lost in transit', value: String(tradeResult.lost) },
+        { label: 'Realised profit', value: formatMoney(tradeResult.realisedProfit) },
+      ],
+      severity: tradeResult.lost > 0 ? 'warning' : 'info',
+    });
   }
 
   /* ------------------------------- 2b. factions -------------------------- */
