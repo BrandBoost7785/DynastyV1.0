@@ -231,6 +231,10 @@ describe('a landed cargo is a supply event in the destination market', () => {
     const state = fresh('network-proceeds');
     const network = state.world.tradeNetwork!;
     const agent = Object.values(network.agents)[0]!;
+    // Only this firm is trading, and it is not dispatching today: every change to its
+    // books here comes from the cargo placed below, which is what the test asserts.
+    for (const other of Object.values(network.agents)) if (other.id !== agent.id) other.status = 'insolvent';
+    agent.lastDispatchDay = 1_000_000;
     const location = world.location(state.player.locationId)!;
     const commodity = registry.all().find((c) => c.legality === 'legal')!;
     const market = ensureMarket(state, location.id, commodity.id)!;

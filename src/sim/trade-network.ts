@@ -47,8 +47,6 @@ import type {
   CommodityDef,
   GameState,
   ID,
-  LocationDef,
-  MarketState,
   RouteDef,
   TradeAgentState,
   TradeFlowState,
@@ -56,8 +54,8 @@ import type {
   TravelMode,
   WorldState,
 } from './types';
-import { marketKey, tradeImpact, type MarketContext } from './economy';
-import { absorbableUnits, ensureMarket, marketContext, pruneMarkets, recordRivalTrade } from './markets';
+import { marketKey, prospectiveMarket, tradeImpact, type MarketContext } from './economy';
+import { absorbableFrom, absorbableUnits, ensureMarket, isOpenlyTraded, marketContext, pruneMarkets, recordRivalTrade } from './markets';
 import { newId, round2 } from './state';
 import { pushNews } from './world';
 import { orderedEntries, orderedKeys } from './ordering';
@@ -157,8 +155,17 @@ interface Leg {
   marginFraction: number;
 }
 
-function closedMarket(market: MarketState | undefined): boolean {
-  return !market || market.price <= 0;
+/**
+ * Discovery facts, for tests and operations.
+ *
+ * Server-side only — never part of a DTO. `indexLegs` is the size of the world's
+ * opportunity index and `windowSize` the number of legs priced per day, both of which
+ * are properties of the registry rather than of any save, so they are the cheapest
+ * honest way to assert that discovery is bounded.
+ */
+export function tradeDiscoverySummary(): { indexLegs: number; sweepWindowDays: number; windowSize: number } {
+  const index = opportunityIndex();
+  return { indexLegs: index.length, sweepWindowDays: B.tradeNetwork.sweepWindowDays, windowSize: sweepWindowRange(index.length, 0).size };
 }
 
 /**
@@ -168,95 +175,196 @@ function closedMarket(market: MarketState | undefined): boolean {
  * are blocked from commodities they are not allowed to move (a legitimate trading
  * house does not buy narcotics just because they are cheap).
  */
-function channelPrices(c: CommodityDef, market: MarketState, agentKindRestricted: boolean): { buy: number; sell: number } | null {
+function channelPrices(c: CommodityDef, price: number, agentKindRestricted: boolean): { buy: number; sell: number } | null {
   if (c.legality !== 'legal') {
     if (c.legality === 'illegal' || c.legality === 'contraband') return null;
     if (agentKindRestricted && c.legality === 'restricted') return null;
   }
   const spread = c.legality === 'legal' ? B.market.legalSpread : B.market.illegalSpread;
   const half = Math.max(0.005, spread * 0.5);
-  return { buy: round2(market.price * (1 + half)), sell: round2(market.price * (1 - half)) };
+  return { buy: round2(price * (1 + half)), sell: round2(price * (1 - half)) };
 }
 
 /*
- * Per-tick market lookup cache.
+ * ---------------------------------------------------------------- discovery --
  *
- * A firm scores every origin×destination pair for the commodities it scans, and
- * agents overlap heavily on the same books, so the *same* location/commodity pair is
- * looked up thousands of times in one tick. `ensureMarket` materialises a book on
- * first touch, which is the expensive part; this cache makes it happen once per pair
- * per tick instead. It is a pure lookup cache — same books, same order, no RNG — so
- * simulation results are unchanged.
- */
-type MarketBookCache = Map<string, MarketState | null>;
-
-/*
- * Per-tick leg memo.
+ * ## The opportunity index
  *
- * A leg's economics (`evaluateLeg`) depend only on the commodity, the two cities and
- * the route — never on which firm is looking at it, because the firm's own budget is
- * applied afterwards in `sizeFor`. Firms overlap heavily on the same cities, so without
- * this the same leg is priced once per firm per day. Memoising it is exact: same
- * inputs, same `Leg` object, same ordering of the scan's comparisons.
+ * A leg is only economically possible if a city *openly trades* the commodity (a
+ * rival cannot buy what a market does not stock — the same rule `materialiseLocation`
+ * applies to the player) and the two cities are joined by a route the world prices.
+ * Both facts come from the registries, so the *complete* set of possible legs can be
+ * enumerated once and reused for the whole run: it does not depend on the save, the
+ * day or any firm's behaviour.
+ *
+ * ## Why a sweep, not a search
+ *
+ * Phase 3 asked every firm to score every city pair it operated on every day, which
+ * priced the same legs repeatedly and, worse, asked `ensureMarket` to invent books in
+ * cities that never traded the good — tens of thousands of markets a day, most of them
+ * immediately evicted by `pruneMarkets`, and most of the network's trade happening in
+ * them. Publishing a price for a line a city does not stock is not a rival economy,
+ * it is a different one.
+ *
+ * Instead the index is walked in a fixed, deterministic rotation: each day prices a
+ * bounded slice of the whole map, and over `sweepWindowDays` the complete index has
+ * been considered exactly once. A firm then chooses from that day's *priced* slice.
+ * Cost per day is therefore proportional to the size of the slice, not to
+ * firms × commodities × cities × cities, while over any window every opportunity in
+ * the world is still examined — no opportunity is excluded, only scheduled.
+ *
+ * Window size is `ceil(index / sweepWindowDays)`, so a bigger world is swept more
+ * thinly rather than costing more per tick.
  */
-type LegCache = Map<string, Leg | null>;
-
-function legIn(
-  cache: LegCache,
-  state: GameState,
-  ctx: MarketContext,
-  books: MarketBookCache,
-  commodity: CommodityDef,
-  origin: LocationDef,
-  destination: LocationDef,
-  route: RouteDef,
-  restricted: boolean,
-): Leg | null {
-  const key = `${commodity.id}::${origin.id}::${destination.id}`;
-  const cached = cache.get(key);
-  if (cached !== undefined) return cached;
-  const leg = evaluateLeg(state, ctx, commodity, origin, destination, route, restricted, books);
-  cache.set(key, leg);
-  return leg;
+interface IndexedLeg {
+  commodityId: ID;
+  routeId: ID;
+  originId: ID;
+  destinationId: ID;
 }
 
-function marketIn(
-  books: MarketBookCache,
+/**
+ * Every economically possible leg in the world, in a fixed order.
+ *
+ * Built once per process from the registries: routes are iterated in id order, and
+ * each route yields its two directed legs for every commodity both ends trade and a
+ * firm may legally move. The order is the sweep order, so it is part of determinism —
+ * it must not depend on object key order or on any mutable state.
+ */
+let OPPORTUNITY_INDEX: IndexedLeg[] | null = null;
+
+function opportunityIndex(): IndexedLeg[] {
+  if (OPPORTUNITY_INDEX) return OPPORTUNITY_INDEX;
+  const world = getWorldRegistry();
+  const registry = getCommodityRegistry();
+  const out: IndexedLeg[] = [];
+  const routes = world.routes.map((r) => r.id).sort();
+  for (const routeId of routes) {
+    const route = world.route(routeId);
+    if (!route) continue;
+    const a = world.location(route.from);
+    const b = world.location(route.to);
+    if (!a || !b || a.hidden || b.hidden) continue;
+    const shared = a.tradedCommodityIds
+      .filter((id) => b.tradedCommodityIds.includes(id))
+      .filter((id) => registry.get(id)?.legality === 'legal')
+      .sort();
+    for (const commodityId of shared) {
+      // Both directions are real legs: prices differ end to end even on one road.
+      out.push({ commodityId, routeId, originId: a.id, destinationId: b.id });
+      out.push({ commodityId, routeId, originId: b.id, destinationId: a.id });
+    }
+  }
+  OPPORTUNITY_INDEX = out;
+  return out;
+}
+
+/** The index slice priced on a given day, rotating so the whole index is covered. */
+/**
+ * The slice of the index that a given day prices.
+ *
+ * Pure arithmetic on `(day, indexLength)` — no state, no clock, no RNG — so the same
+ * day always prices the same legs, in any process, before or after a restore. The
+ * window advances by exactly one window per day, which is what makes the sweep cover
+ * the whole index every `sweepWindowDays` days instead of circling a subset.
+ */
+export function sweepWindowRange(indexLength: number, day: number): { start: number; size: number } {
+  if (indexLength <= 0) return { start: 0, size: 0 };
+  const size = Math.min(indexLength, Math.max(1, Math.ceil(indexLength / Math.max(1, B.tradeNetwork.sweepWindowDays))));
+  const start = ((day * size) % indexLength + indexLength) % indexLength;
+  return { start, size };
+}
+
+function sweepWindow(index: IndexedLeg[], day: number): IndexedLeg[] {
+  if (index.length === 0) return index;
+  const { start, size } = sweepWindowRange(index.length, day);
+  const out: IndexedLeg[] = [];
+  for (let i = 0; i < size; i += 1) out.push(index[(start + i) % index.length]!);
+  return out;
+}
+
+/**
+ * A line's price, whether or not a book exists for it yet.
+ *
+ * `live` means the stored book is authoritative and the trade will settle against it.
+ * A non-live line is priced with `prospectiveMarket` — the exact arithmetic its book
+ * would open at — so ranking never requires creating a market. Creating one is a
+ * separate, deliberate step (`ensureMarket`) taken only for a leg a firm actually
+ * dispatches, exactly as the player's own arbitrage scanner does.
+ */
+interface PricePoint {
+  price: number;
+  supply: number;
+  fundamental: number;
+  /** How much of the book is available to buy (origin side) today. */
+  absorbable: number;
+  live: boolean;
+}
+
+function priceAt(
   state: GameState,
   ctx: MarketContext,
   locationId: ID,
   commodityId: ID,
-): MarketState | null {
-  const key = `${locationId}::${commodityId}`;
-  const cached = books.get(key);
+  cache: Map<string, PricePoint | null>,
+): PricePoint | null {
+  const key = marketKey(locationId, commodityId);
+  const cached = cache.get(key);
   if (cached !== undefined) return cached;
-  const market = ensureMarket(state, locationId, commodityId, ctx) ?? null;
-  books.set(key, market);
-  return market;
+  let point: PricePoint | null = null;
+  const live = state.markets[key];
+  if (live && live.price > 0) {
+    point = {
+      price: live.price,
+      supply: live.supply,
+      fundamental: live.fundamental,
+      absorbable: absorbableUnits(state, live, 'buy'),
+      live: true,
+    };
+  } else if (isOpenlyTraded(locationId, commodityId)) {
+    const p = prospectiveMarket(locationId, commodityId, ctx, state.world.day);
+    if (p && p.price > 0) {
+      point = {
+        price: p.price,
+        supply: p.supply,
+        fundamental: p.fundamental,
+        absorbable: absorbableFrom(p.supply, p.price, p.fundamental, 'buy', 0),
+        live: false,
+      };
+    }
+  }
+  cache.set(key, point);
+  return point;
 }
 
 /**
- * Evaluate a single origin→destination leg for one commodity.
+ * Exact economics of one indexed leg.
  *
- * Returns null unless the leg is physically possible, legally open to the agent,
- * and the freight bill still leaves a margin worth taking.
+ * Prices come from `priceAt`, so a leg whose books exist settles against the stored
+ * price and a leg whose books do not yet exist is priced at exactly what they would
+ * open at. Nothing is created here.
  */
 function evaluateLeg(
   state: GameState,
   ctx: MarketContext,
-  commodity: CommodityDef,
-  origin: LocationDef,
-  destination: LocationDef,
-  route: RouteDef,
+  entry: IndexedLeg,
   restricted: boolean,
-  books: MarketBookCache,
+  cache: Map<string, PricePoint | null>,
 ): Leg | null {
-  const originMarket = marketIn(books, state, ctx, origin.id, commodity.id);
-  const destinationMarket = marketIn(books, state, ctx, destination.id, commodity.id);
-  if (closedMarket(originMarket ?? undefined) || closedMarket(destinationMarket ?? undefined)) return null;
+  const registry = getCommodityRegistry();
+  const worldReg = getWorldRegistry();
+  const commodity = registry.get(entry.commodityId);
+  const route = worldReg.route(entry.routeId);
+  const origin = worldReg.location(entry.originId);
+  const destination = worldReg.location(entry.destinationId);
+  if (!commodity || !route || !origin || !destination) return null;
 
-  const originPrices = channelPrices(commodity, originMarket!, restricted);
-  const destinationPrices = channelPrices(commodity, destinationMarket!, restricted);
+  const originPoint = priceAt(state, ctx, origin.id, commodity.id, cache);
+  const destinationPoint = priceAt(state, ctx, destination.id, commodity.id, cache);
+  if (!originPoint || !destinationPoint) return null;
+
+  const originPrices = channelPrices(commodity, originPoint.price, restricted);
+  const destinationPrices = channelPrices(commodity, destinationPoint.price, restricted);
   if (!originPrices || !destinationPrices) return null;
 
   const mode = freightModeFor(route, route.distanceKm);
@@ -280,9 +388,7 @@ function evaluateLeg(
   if (marginFraction < B.tradeNetwork.minMarginFraction) return null;
   // A route that is closed (disrupted and unknown) carries no cargo.
   if (routeState.disrupted && risk >= B.tradeNetwork.maxDispatchRisk) return null;
-
-  const originAbsorbable = absorbableUnits(state, originMarket!, 'buy');
-  if (originAbsorbable <= 0) return null;
+  if (originPoint.absorbable <= 0) return null;
 
   return {
     commodity,
@@ -297,8 +403,8 @@ function evaluateLeg(
     risk,
     margin,
     marginFraction,
-    originAbsorbable,
-    destinationSupply: Math.max(0, destinationMarket!.supply),
+    originAbsorbable: originPoint.absorbable,
+    destinationSupply: Math.max(0, destinationPoint.supply),
   };
 }
 
@@ -311,9 +417,15 @@ function sizeFor(leg: Leg, budget: number): number {
   return Math.max(0, size);
 }
 
-/* ------------------------------------------------------------------ */
-/* The tick                                                            */
-/* ------------------------------------------------------------------ */
+/** Fixed, total order for two priced legs: best margin first, ids break every tie. */
+function compareLegs(a: Leg, b: Leg): number {
+  if (b.marginFraction !== a.marginFraction) return b.marginFraction - a.marginFraction;
+  if (b.margin !== a.margin) return b.margin - a.margin;
+  if (a.commodity.id !== b.commodity.id) return a.commodity.id < b.commodity.id ? -1 : 1;
+  if (a.route.id !== b.route.id) return a.route.id < b.route.id ? -1 : 1;
+  if (a.originId !== b.originId) return a.originId < b.originId ? -1 : 1;
+  return a.destinationId < b.destinationId ? -1 : a.destinationId === b.destinationId ? 0 : 1;
+}
 
 export interface TradeNetworkTickResult {
   dispatched: number;
@@ -324,24 +436,6 @@ export interface TradeNetworkTickResult {
   agentFailures: { agentId: ID; name: string; reason: string }[];
   /** Market keys whose book changed because of a delivery this tick. */
   touchedMarkets: ID[];
-}
-
-/** Candidate commodities for an agent: its focus categories, sampled per day. */
-function candidateCommodities(agent: TradeAgentState, rng: Rng): CommodityDef[] {
-  const registry = getCommodityRegistry();
-  const out: CommodityDef[] = [];
-  const seen = new Set<ID>();
-  for (const category of agent.focus) {
-    const pool = registry.byCategoryList(category).filter((c) => c.legality === 'legal' || c.legality === 'restricted');
-    if (pool.length === 0) continue;
-    for (let i = 0; i < B.tradeNetwork.commoditiesPerAgentScan; i += 1) {
-      const pick = rng.pick(pool);
-      if (!pick || seen.has(pick.id)) continue;
-      seen.add(pick.id);
-      out.push(pick);
-    }
-  }
-  return out;
 }
 
 /**
@@ -373,17 +467,15 @@ export function tradeNetworkTick(state: GameState, rng: Rng): TradeNetworkTickRe
   /*
    * One market context for the whole network pass.
    *
-   * Deliberately lazy: on a day when no agent has capital, is off cooldown and
-   * rolls a scan, nothing is built at all. When a scan does run, every market it
-   * materialises shares this context instead of recomputing faction pressure for
-   * all 48 locations each time.
+   * Deliberately lazy: on a day when the sweep prices nothing, nothing is built at
+   * all. When legs are priced they share this context instead of recomputing faction
+   * pressure for every location each time.
    */
   let ctx: MarketContext | null = null;
   const contextFor = () => (ctx ??= marketContext(state));
-  // One book cache and one leg memo per tick: see their definitions for why both are
-  // exact rather than approximations.
-  const books: MarketBookCache = new Map();
-  const legs: LegCache = new Map();
+  // Priced lines for this tick, keyed by market. Shared by every leg that touches the
+  // line — one route's two directions both read both ends.
+  const peeks = new Map<string, PricePoint | null>();
 
   /* ------------------------- 1. settle in-transit cargo ------------------------ */
   for (const flow of network.flows) {
@@ -453,6 +545,40 @@ export function tradeNetworkTick(state: GameState, rng: Rng): TradeNetworkTickRe
   }
 
   /* ------------------------------ 2. dispatch ----------------------------- */
+  /*
+   * Price today's slice of the opportunity index once, then let firms choose.
+   *
+   * The slice is shared by every firm, so the cost of discovery is a property of the
+   * *world* rather than of how many firms happen to be trading — the previous design
+   * paid `firms × commodities × cities × cities` a day, which is why agent count
+   * multiplied the tick. Evaluation is exact: a leg is priced at its stored book price
+   * where a book exists, and at exactly what its book would open at where it does not,
+   * so nothing is created merely to be considered.
+   */
+  const index = opportunityIndex();
+  const window = sweepWindow(index, day);
+  const priced: Leg[] = [];
+  if (window.length > 0) {
+    const scanCtx = contextFor();
+    const restricted = true; // legitimate firms do not touch restricted goods
+    for (const entry of window) {
+      const leg = evaluateLeg(state, scanCtx, entry, restricted, peeks);
+      if (leg) priced.push(leg);
+    }
+  }
+
+  /*
+   * Deterministic ranking, then deterministic allocation.
+   *
+   * Firms are served in id order and each takes its own best remaining leg, so the
+   * result never depends on iteration order. A leg already dispatched today is not
+   * offered again: the book's absorbable stock was consumed by the first claim, and
+   * two firms cannot both buy the same units.
+   */
+  priced.sort(compareLegs);
+  const claimed = new Set<string>();
+  const legKey = (leg: Leg) => `${leg.commodity.id}::${leg.route.id}::${leg.originId}::${leg.destinationId}`;
+
   for (const id of orderedKeys(network.agents)) {
     const agent = network.agents[id]!;
     if (agent.status !== 'active') continue;
@@ -463,50 +589,42 @@ export function tradeNetworkTick(state: GameState, rng: Rng): TradeNetworkTickRe
     const inFlight = network.flows.filter((f) => f.agentId === agent.id && f.status === 'in_transit').length;
     if (inFlight >= B.tradeNetwork.maxFlowsPerAgent) continue;
 
-    const locations = agent.operatingLocationIds
-      .map((locationId) => worldReg.location(locationId))
-      .filter((l): l is LocationDef => l !== undefined && !l.hidden);
-    if (locations.length < 2) continue;
-
-    const scanCtx = contextFor();
-    const commodities = candidateCommodities(agent, rng);
-    const restricted = true; // legitimate firms do not touch restricted goods
+    /*
+     * A firm works the roads out of its own cities: it must be able to buy at the
+     * origin. Scoring is expected profit, `margin × size` — not markup, which would
+     * pick the thinnest, most expensive good on the map. Moving freight is what presses
+     * a price down, so size belongs in the choice.
+     */
+    const cities = new Set(agent.operatingLocationIds);
+    if (cities.size === 0) continue;
     const budget = agent.capital * B.tradeNetwork.capitalCommitFraction;
 
-    /*
-     * A firm maximises *expected profit*, not markup.
-     *
-     * Scoring legs by unit margin picks the thinnest, most expensive good on the
-     * map — two bars of refined gold — because a 4% edge on a 400,000-unit item
-     * dwarfs a 3% edge on a truckload. Real carriers move freight, so the score is
-     * `margin × size`, which naturally favours deep books with a worthwhile spread
-     * and is also what makes a landed cargo big enough to press a price down.
-     */
     let best: Leg | null = null;
     let bestSize = 0;
     let bestScore = 0;
-    for (const commodity of commodities) {
-      for (const origin of locations) {
-        for (const destination of locations) {
-          if (origin.id === destination.id) continue;
-          const route = worldReg.routeBetween(origin.id, destination.id);
-          if (!route) continue;
-          const leg = legIn(legs, state, scanCtx, books, commodity, origin, destination, route, restricted);
-          if (!leg) continue;
-          const size = sizeFor(leg, budget);
-          if (size <= 0) continue;
-          const score = leg.margin * size;
-          if (score > bestScore) {
-            best = leg;
-            bestSize = size;
-            bestScore = score;
-          }
-        }
+    for (const leg of priced) {
+      if (!cities.has(leg.originId)) continue;
+      const key = legKey(leg);
+      if (claimed.has(key)) continue;
+      const size = sizeFor(leg, budget);
+      if (size <= 0) continue;
+      const score = leg.margin * size;
+      if (score > bestScore) {
+        best = leg;
+        bestSize = size;
+        bestScore = score;
       }
     }
     if (!best) continue;
 
-    const market = ensureMarket(state, best.originId, best.commodity.id, scanCtx);
+    /*
+     * Only now is a market created, and only for the leg actually being worked — the
+     * origin to buy from, and the destination the cargo is priced against. Where the
+     * line was already live this is a lookup; where it was not, the book opens at
+     * exactly the price the leg was evaluated at, because `prospectiveMarket` is the
+     * same arithmetic `createMarketState` uses.
+     */
+    const market = ensureMarket(state, best.originId, best.commodity.id, contextFor());
     if (!market) continue;
     const absorbable = absorbableUnits(state, market, 'buy');
     if (absorbable <= 0) continue;
@@ -518,15 +636,25 @@ export function tradeNetworkTick(state: GameState, rng: Rng): TradeNetworkTickRe
     market.lastTradedDay = day;
     touched.add(market.key);
     const spend = round2(qty * market.price);
-    agent.capital = round2(agent.capital - spend);
+    const freightBill = round2(qty * best.freight);
+    /*
+     * Freight is paid, not merely recorded.
+     *
+     * The cost basis carries freight so the leg is judged after it; cash has to leave
+     * the same way, or a firm's balance sheet drifts above its own profit and loss.
+     * Capital now moves by exactly `proceeds − spend − freight`, which is what
+     * `realisedProfit` reports when the cargo lands.
+     */
+    agent.capital = round2(agent.capital - spend - freightBill);
     agent.lastDispatchDay = day;
     agent.dispatched += 1;
+    claimed.add(legKey(best));
     // The market's daily absorb cap is shared with the player, but the *player's*
     // volume counter is not: rival volume must never be attributed to the player.
     recordRivalTrade(state, market.key, qty, day);
     if (market.price <= 0) {
       // A dead book is not a market; refund and skip rather than dispatch nothing.
-      agent.capital = round2(agent.capital + spend);
+      agent.capital = round2(agent.capital + spend + freightBill);
       continue;
     }
 
@@ -539,34 +667,35 @@ export function tradeNetworkTick(state: GameState, rng: Rng): TradeNetworkTickRe
       routeId: best.route.id,
       mode: best.mode,
       qty,
-      unitCost: round2((spend + qty * best.freight) / qty),
+      unitCost: round2((spend + freightBill) / qty),
       notionalValue: round2(qty * best.sellPrice),
       dispatchedDay: day,
       arrivesDay: day + best.days,
       status: 'in_transit',
       detail: null,
     };
-    // Freight is paid up front, like the player pays a carrier.
-    agent.capital = round2(agent.capital - qty * best.freight);
     network.flows.push(flow);
-    network.stats.dispatched += 1;
     result.dispatched += 1;
+    network.stats.dispatched += 1;
+  }
 
-    // The trade is worth a line in the feed when it is large enough to matter to
-    // the destination's book, which is the signal of a real dislocation.
-    const destinationMarket = state.markets[marketKey(best.destinationId, best.commodity.id)];
-    const bookShare = destinationMarket ? qty / Math.max(1, destinationMarket.supply) : 0;
-    if (bookShare >= B.tradeNetwork.newsWorthinessBookShare) {
-      pushNews(world, {
-        scope: 'regional',
-        category: 'market',
-        headline: `${agent.name} ships ${best.commodity.name} to ${worldReg.requireLocation(best.destinationId).name}`,
-        body: `${qty.toLocaleString('en-US')} units bought at ${worldReg.requireLocation(best.originId).name} for ${worldReg.requireLocation(best.destinationId).name}, arriving day ${flow.arrivesDay} (~${(bookShare * 100).toFixed(1)}% of the local book).`,
-        locationIds: [best.originId, best.destinationId],
-        tags: ['trade', best.commodity.id, agent.id],
-        importance: bookShare > 0.2 ? 4 : 2,
-      });
-    }
+  /*
+   * Keep the flow log bounded.
+   *
+   * The history exists for the player — a route's recent traffic, who lost what and
+   * when — not as a crossing-by-crossing audit, so settled flows beyond
+   * `flowHistory` are dropped oldest-first. That bounds the save for any run length.
+   * In-transit cargo is never dropped: it is live state the tick still has to settle.
+   */
+  if (network.flows.length > B.tradeNetwork.flowHistory) {
+    const excess = network.flows.length - B.tradeNetwork.flowHistory;
+    const drop = new Set(
+      network.flows
+        .filter((f) => f.status !== 'in_transit')
+        .slice(0, excess)
+        .map((f) => f.id),
+    );
+    if (drop.size > 0) network.flows = network.flows.filter((f) => !drop.has(f.id));
   }
 
   /* --------------------------- 3. agent solvency --------------------------- */

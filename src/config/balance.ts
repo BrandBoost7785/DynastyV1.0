@@ -203,8 +203,17 @@ export const BALANCE = {
     lossesBeforeExit: 4,
     /** Cargoes one agent may have in the air at once. */
     maxFlowsPerAgent: 8,
-    /** Commodities sampled per focus category, per scan. */
-    commoditiesPerAgentScan: 2,
+    /*
+     * Days it takes the opportunity sweep to consider the entire map.
+     *
+     * Discovery walks a fixed index of every economically possible leg (a route, a
+     * commodity both ends openly trade, and a firm allowed to move it), pricing
+     * `ceil(index / sweepWindowDays)` legs a day. This is the dial that trades sweep
+     * resolution against cost: shorter means an opportunity is noticed sooner after it
+     * appears. It is deliberately not a per-firm scan budget — firms share one priced
+     * slice per day, so agent count no longer multiplies the work.
+     */
+    sweepWindowDays: 6,
     /** Interception chance per unit of route risk (wars close routes). */
     interceptionPerRisk: 0.22,
     maxInterceptionChance: 0.6,

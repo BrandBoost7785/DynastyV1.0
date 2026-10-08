@@ -574,12 +574,39 @@ export function recordRivalTrade(state: GameState, marketKey: ID, qty: number, d
 }
 
 export function absorbableUnits(state: GameState, market: MarketState, side: 'buy' | 'sell'): number {
-  const base = market.supply * ABSORB_FRACTION;
-  const premium = market.fundamental > 0 ? market.price / market.fundamental - 1 : 0;
+  return absorbableFrom(market.supply, market.price, market.fundamental, side, tradedToday(state, market));
+}
+
+/**
+ * The same absorbable rule, from the four numbers it actually depends on.
+ *
+ * Split out so a line that has no stored book yet can still be sized — a rival firm
+ * ranking destinations asks "how much could I sell here?" about lines it has not
+ * traded, and answering must not require creating them. `absorbableUnits` is the
+ * book-bound wrapper, so there is one rule and not two.
+ */
+export function absorbableFrom(supply: number, price: number, fundamental: number, side: 'buy' | 'sell', tradedToday: number): number {
+  const base = supply * ABSORB_FRACTION;
+  const premium = fundamental > 0 ? price / fundamental - 1 : 0;
   const dislocation = side === 'sell' ? Math.max(0, premium) : Math.max(0, -premium);
   const guard = B.market.arbitrageGuardMaxMargin;
   const factor = dislocation > guard ? guard / dislocation : 1;
-  return Math.max(0, Math.floor(base * clamp(factor, 0.05, 1) - tradedToday(state, market)));
+  return Math.max(0, Math.floor(base * clamp(factor, 0.05, 1) - tradedToday));
+}
+
+/**
+ * Does this city openly trade this commodity?
+ *
+ * This is the world's own definition of a market line: `materialiseLocation`, the
+ * market read model and the trade-permission check all read `tradedCommodityIds`.
+ * A rival firm obeys the same rule, so a price cannot exist for a line a city does
+ * not stock — which is also what keeps discovery from inventing markets. Hidden
+ * channels are excluded deliberately: they are the player's discovered underground,
+ * not a legal trader's supply base.
+ */
+export function isOpenlyTraded(locationId: ID, commodityId: ID): boolean {
+  const location = worldReg.location(locationId);
+  return location !== undefined && location.tradedCommodityIds.includes(commodityId);
 }
 
 function impactFor(market: MarketState, c: CommodityDef, qty: number, side: 'buy' | 'sell', reduction: number): number {

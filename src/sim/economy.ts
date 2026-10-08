@@ -417,6 +417,43 @@ export function politicalPressureIndex(world: WorldState, locationIds: ID[]): Ma
 }
 
 /** Create the stored state for a market that has just become relevant. */
+/**
+ * The price a market line *would* open at, without creating anything.
+ *
+ * This is the same arithmetic `createMarketState` uses for its opening price — same
+ * fundamental, same seeded scarcity, same deterministic opening wobble — but it
+ * touches no state: no book is written, no history is back-filled and no RNG stream
+ * is consumed (`mkt-init` is a private hash-based stream). It exists because
+ * discovery and creation are different questions: an actor (the player's arbitrage
+ * scanner, or a rival firm ranking destinations) needs to ask "what is this line
+ * worth?" about far more lines than it will ever trade, and asking used to mean
+ * materialising a market per question.
+ *
+ * Returns null only when the location or commodity is unknown.
+ */
+export function prospectiveMarket(
+  locationId: ID,
+  commodityId: ID,
+  ctx: MarketContext,
+  day: number,
+): { price: number; fundamental: number; supply: number; demand: number } | null {
+  const world = getWorldRegistry();
+  const registry = getCommodityRegistry();
+  const location = ctx.locations.get(locationId) ?? world.location(locationId);
+  const commodity = registry.get(commodityId);
+  if (!location || !commodity) return null;
+  const locationState = ctx.locationStates.get(locationId);
+  const political = ctx.political?.get(locationId);
+  const fundamental = fundamentalPrice({ location, locationState, commodity, world: ctx.world, day, political });
+  const supply = baseSupplyUnits(location, commodity);
+  const demand = baseDemandUnits(location, commodity, ctx.world, locationState);
+  const rng = new Rng(`mkt-init:${locationId}:${commodityId}:${day}`, 'market-init');
+  const seededScarcity = clamp(Math.pow(demand / Math.max(0.1, supply), B.economy.priceElasticity), ...B.economy.scarcityClamp);
+  const openingWobble = rng.float(0.94, 1.06);
+  const price = clamp(fundamental * seededScarcity * openingWobble, fundamental * B.market.priceFloorFraction, fundamental * B.market.priceCeilingMultiple);
+  return { price, fundamental, supply, demand };
+}
+
 export function createMarketState(
   locationId: ID,
   commodityId: ID,
@@ -431,15 +468,16 @@ export function createMarketState(
 
   const locationState = ctx.locationStates.get(locationId);
   const political = ctx.political?.get(locationId);
-  const fundamental = fundamentalPrice({ location, locationState, commodity, world: ctx.world, day, political });
-  const supply = baseSupplyUnits(location, commodity);
-  const demand = baseDemandUnits(location, commodity, ctx.world, locationState);
+  // One source of truth for the opening price: `prospectiveMarket`.
+  const opening = prospectiveMarket(locationId, commodityId, ctx, day);
+  if (!opening) return null;
+  const { fundamental, supply, demand, price } = opening;
   const rng = new Rng(`mkt-init:${locationId}:${commodityId}:${day}`, 'market-init');
   const seededScarcity = clamp(Math.pow(demand / Math.max(0.1, supply), B.economy.priceElasticity), ...B.economy.scarcityClamp);
-  // One draw, captured rather than inlined: it is both the opening wobble and one
-  // of the two drivers that explain the opening price (see `seedDrivers` below).
+  // The same opening draw is taken twice from the same private stream: once here for
+  // the book's own sentiment, and once inside `prospectiveMarket` for the price. The
+  // streams are independent, so ordering cannot change either value.
   const openingWobble = rng.float(0.94, 1.06);
-  const price = clamp(fundamental * seededScarcity * openingWobble, fundamental * B.market.priceFloorFraction, fundamental * B.market.priceCeilingMultiple);
 
   const history: number[] = [];
   // Back-fill a short synthetic history so charts and trend indicators are
