@@ -131,6 +131,9 @@ create index if not exists intent_receipts_created_idx on intent_receipts (game_
 
 type Row = Record<string, string | number | null | Uint8Array>;
 
+/** Returned when a new game's id is already taken. The caller retries with a new id. */
+const SAVE_ID_IN_USE = 'That save id is already in use. Create the game again to receive a new id.';
+
 function asMetadata(row: Row): SaveMetadata {
   return {
     gameId: String(row.game_id),
@@ -321,27 +324,38 @@ export class SqliteStore implements GameStore {
       if (!sealed.ok) return sealed;
 
       const meta = extractMetadata(record.state);
-      const existing = db.prepare('select version, schema_version from games where game_id = ? and user_id = ?').get(meta.gameId, meta.userId) as Row | undefined;
+      // The game id is the primary key and is globally unique, so existence is checked by id
+      // alone. A row owned by someone else is a collision, not a save to write to.
+      const existing = db.prepare('select user_id, version from games where game_id = ?').get(meta.gameId) as Row | undefined;
       const now = new Date().toISOString();
 
       if (!existing) {
         if (expectedVersion !== null && expectedVersion !== 0) {
           return err('conflict', `Save "${meta.gameId}" does not exist, but the write expected version ${expectedVersion}.`);
         }
-        db.prepare(
+        // Insert-only. `on conflict do nothing` makes the check and the insert one atomic
+        // step, so a row inserted by a concurrent writer is never replaced.
+        const inserted = db.prepare(
           `insert into games (game_id, user_id, name, status, schema_version, version, day, turn, level, title, net_worth,
              empire_score, world_seed, difficulty, location_id, incarcerated, ending_kind, state, integrity_hash, size_bytes,
              created_at, updated_at)
-           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           on conflict (game_id) do nothing`,
         ).run(
           meta.gameId, meta.userId, meta.name, meta.status, CURRENT_SCHEMA_VERSION, meta.version, meta.day, meta.turn,
           meta.level, meta.title, meta.netWorth, meta.empireScore, meta.worldSeed, meta.difficulty, meta.locationId,
           meta.incarcerated ? 1 : 0, meta.endingKind, sealed.value.json, sealed.value.integrityHash, sealed.value.sizeBytes,
           record.createdAt || now, now,
         );
+        if (Number(inserted.changes) === 0) return err('conflict', SAVE_ID_IN_USE);
       } else {
+        if (String(existing.user_id) !== meta.userId) return err('conflict', SAVE_ID_IN_USE);
+        // A write that names no version may create a save but never replace one.
+        if (expectedVersion === null) {
+          return err('conflict', `Save "${meta.gameId}" already exists. A write must name the version it replaces.`);
+        }
         const currentVersion = Number(existing.version);
-        if (expectedVersion !== null && expectedVersion !== currentVersion) {
+        if (expectedVersion !== currentVersion) {
           return err(
             'conflict',
             `Save "${meta.gameId}" is at version ${currentVersion} but this write expected ${expectedVersion}. Another session saved first; reload before continuing.`,
@@ -388,12 +402,24 @@ export class SqliteStore implements GameStore {
   async deleteGame(gameId: ID, userId: ID): Promise<StoreResult<void>> {
     await this.init();
     const db = this.require();
-    // Ownership is re-checked on the delete itself; the dependent rows are only
-    // touched for a save this account actually owns.
-    db.prepare('delete from game_versions where game_id = ?').run(gameId);
-    db.prepare('delete from intent_receipts where game_id = ?').run(gameId);
-    const result = db.prepare('delete from games where game_id = ? and user_id = ?').run(gameId, userId);
-    if (Number(result.changes) === 0) return err('not_found', `No save "${gameId}" for this account.`);
+    // Ownership is proven first. The dependent rows are then removed only for a save this
+    // account owns; an unowned id must not be able to clear another player's history.
+    const owned = db.prepare('select 1 from games where game_id = ? and user_id = ?').get(gameId, userId);
+    if (!owned) return err('not_found', `No save "${gameId}" for this account.`);
+    db.exec('begin immediate');
+    try {
+      db.prepare('delete from game_versions where game_id = ?').run(gameId);
+      db.prepare('delete from intent_receipts where game_id = ?').run(gameId);
+      const result = db.prepare('delete from games where game_id = ? and user_id = ?').run(gameId, userId);
+      if (Number(result.changes) === 0) {
+        db.exec('rollback');
+        return err('not_found', `No save "${gameId}" for this account.`);
+      }
+      db.exec('commit');
+    } catch (error) {
+      db.exec('rollback');
+      throw error;
+    }
     return ok(undefined);
   }
 

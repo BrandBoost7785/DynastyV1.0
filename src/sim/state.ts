@@ -56,6 +56,16 @@ const B = getBalance();
 /* Ids                                                                 */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The key the simulation hashes with where it needs a per-game constant. It is derived
+ * from the world seed, never from the persistent game id, so two games started from one
+ * seed get the same market and mission behaviour. A save without a stored key falls back
+ * to its game id, which for those saves was the seed-derived value.
+ */
+export function simulationKey(state: GameState): string {
+  return state.config.simulationKey ?? state.gameId;
+}
+
 /** Deterministic id generator. Ids are reproducible from the save seed. */
 export function newId(rng: Rng, prefix: string): ID {
   return `${prefix}_${rng.int(1_000_000, 99_999_999).toString(36)}${rng.int(0, 1295).toString(36)}`;
@@ -190,6 +200,7 @@ export function createLossConditions(difficulty: Difficulty, permadeath: boolean
 
 export interface GameConfigOptions {
   worldSeed: string;
+  simulationKey?: ID;
   difficulty?: Difficulty;
   mode?: GameConfig['mode'];
   startLocationId?: ID;
@@ -208,6 +219,7 @@ export function createGameConfig(opts: GameConfigOptions): GameConfig {
     lossConditions: createLossConditions(difficulty, opts.permadeath ?? false),
     startLocationId: opts.startLocationId ?? pickStartLocation(opts.worldSeed),
     worldSeed: opts.worldSeed,
+    ...(opts.simulationKey ? { simulationKey: opts.simulationKey } : {}),
     permadeath: opts.permadeath ?? false,
     endless: opts.endless ?? true,
     startDateLabel: opts.startDateLabel ?? 'Year One, Spring',

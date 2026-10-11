@@ -51,6 +51,9 @@ pgTypes.setTypeParser(pgTypes.builtins.INT8, (value) => Number.parseInt(value, 1
 
 type Row = Record<string, unknown>;
 
+/** Returned when a new game's id is already taken. The caller retries with a new id. */
+const SAVE_ID_IN_USE = 'That save id is already in use. Create the game again to receive a new id.';
+
 const str = (value: unknown, fallback = ''): string => (value === null || value === undefined ? fallback : String(value));
 const num = (value: unknown, fallback = 0): number => {
   const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
@@ -378,21 +381,23 @@ export class PostgresStore implements GameStore {
       await client.query('begin');
       // Lock the row for the duration of the compare-and-set so two concurrent
       // writers serialize instead of racing.
-      const existing = await client.query('select version from public.games where game_id = $1 and user_id = $2 for update', [
-        meta.gameId,
-        meta.userId,
-      ]);
+      // The game id is the primary key and is globally unique, so existence is checked by id
+      // alone. A row owned by someone else is a collision, not a save to write to.
+      const existing = await client.query('select user_id, version from public.games where game_id = $1 for update', [meta.gameId]);
 
       if (!existing.rowCount) {
         if (expectedVersion !== null && expectedVersion !== 0) {
           await client.query('rollback');
           return err('conflict', `Save "${meta.gameId}" does not exist, but the write expected version ${expectedVersion}.`);
         }
-        await client.query(
+        // Insert-only: `on conflict do nothing` reports no row when the id is taken, so an
+        // existing save is never replaced, even by a concurrent creation.
+        const inserted = await client.query(
           `insert into public.games (game_id, user_id, name, status, schema_version, version, day, turn, level, title,
              net_worth, empire_score, world_seed, difficulty, location_id, incarcerated, ending_kind, state, integrity_hash,
              size_bytes, created_at, updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20,$21,now())`,
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20,$21,now())
+           on conflict (game_id) do nothing`,
           [
             meta.gameId, meta.userId, meta.name, meta.status, CURRENT_SCHEMA_VERSION, meta.version, meta.day, meta.turn,
             meta.level, meta.title, meta.netWorth, meta.empireScore, meta.worldSeed, meta.difficulty, meta.locationId,
@@ -400,9 +405,22 @@ export class PostgresStore implements GameStore {
             record.createdAt || new Date().toISOString(),
           ],
         );
+        if (!inserted.rowCount) {
+          await client.query('rollback');
+          return err('conflict', SAVE_ID_IN_USE);
+        }
       } else {
+        if (String(existing.rows[0]?.user_id) !== meta.userId) {
+          await client.query('rollback');
+          return err('conflict', SAVE_ID_IN_USE);
+        }
+        // A write that names no version may create a save but never replace one.
+        if (expectedVersion === null) {
+          await client.query('rollback');
+          return err('conflict', `Save "${meta.gameId}" already exists. A write must name the version it replaces.`);
+        }
         const currentVersion = num(existing.rows[0]?.version);
-        if (expectedVersion !== null && expectedVersion !== currentVersion) {
+        if (expectedVersion !== currentVersion) {
           await client.query('rollback');
           return err(
             'conflict',

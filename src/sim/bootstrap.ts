@@ -70,6 +70,24 @@ export function deriveSeed(userId: ID, nonce = Date.now()): string {
   return `dyn-${userId}-${nonce.toString(36)}`;
 }
 
+/** 32 lowercase hex characters from the platform's cryptographically secure random source. */
+function secureRandomHex(): string {
+  return globalThis.crypto.randomUUID().replace(/-/g, '');
+}
+
+/**
+ * A persistent game id. It is random and is not derived from the world seed, so a new game
+ * can never share a save row with another game, whatever seed it was started from.
+ */
+export function newPersistentGameId(): ID {
+  return `game_${secureRandomHex()}`;
+}
+
+/** A persistent player id, random for the same reasons as the game id. */
+export function newPersistentPlayerId(): ID {
+  return `plr_${secureRandomHex()}`;
+}
+
 export function createNewGame(opts: NewGameOptions): NewGameResult {
   const seed = opts.seed ?? deriveSeed(opts.userId);
   const difficulty = opts.difficulty ?? 'standard';
@@ -80,9 +98,22 @@ export function createNewGame(opts: NewGameOptions): NewGameResult {
   const companies = initCompanies(world, rng, 0);
   const cryptoAssets = initCryptoAssets(world, rng, 0);
 
+  /* ----------------------------- identity ---------------------------- */
+  // Two draws from the bootstrap stream, in the order they were always made. The first is
+  // the seed-derived simulation key that markets and missions hash with. The second is a
+  // reserved draw whose value is unused: dropping it would shift every later draw (player
+  // creation, mission offers) and change the world a given seed produces.
+  const simulationKeyValue = newId(rng, 'game');
+  newId(rng, 'plr');
+  // Persistent identities come from the secure random source, never from the simulation
+  // stream or the seed, so they do not depend on the world and do not consume its draws.
+  const gameId = newPersistentGameId();
+  const playerId = newPersistentPlayerId();
+
   /* ------------------------------ config ----------------------------- */
   const config: GameConfig = createGameConfig({
     worldSeed: seed,
+    simulationKey: simulationKeyValue,
     difficulty,
     mode: opts.mode ?? 'campaign',
     ...(opts.startLocationId ? { startLocationId: opts.startLocationId } : {}),
@@ -94,8 +125,6 @@ export function createNewGame(opts: NewGameOptions): NewGameResult {
   /* ------------------------------ player ----------------------------- */
   // The ledger checkpoint is keyed by the save's identity, so the game id has to
   // exist before the player is built.
-  const gameId = newId(rng, 'game');
-  const playerId = newId(rng, 'plr');
   const player = createPlayer({
     rng,
     playerId,

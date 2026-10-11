@@ -99,6 +99,9 @@ export interface CreateGameInput {
   endless?: boolean;
 }
 
+/** Attempts at creating a game before a persistent id collision is reported as a conflict. */
+const CREATE_ATTEMPTS = 3;
+
 export async function createGame(input: CreateGameInput): Promise<ServiceOutcome<SaveRecord>> {
   const name = input.gameName?.trim() || `${input.playerName.trim() || 'Trader'}'s dynasty`;
   if (name.length > 80) return { ok: false, code: 'invalid_input', message: 'A game name is at most 80 characters.' };
@@ -107,41 +110,48 @@ export async function createGame(input: CreateGameInput): Promise<ServiceOutcome
     return { ok: false, code: 'invalid_input', message: 'Choose a character name between 1 and 40 characters.' };
   }
 
-  let created;
-  try {
-    created = createNewGame({
-      userId: input.userId,
-      playerName,
-      gameName: name,
-      ...(input.seed ? { seed: input.seed.slice(0, 64) } : {}),
-      difficulty: input.difficulty ?? 'standard',
-      ...(input.startLocationId ? { startLocationId: input.startLocationId } : {}),
-      permadeath: input.permadeath ?? false,
-      endless: input.endless ?? false,
-    });
-  } catch (error) {
-    return { ok: false, code: 'internal_error', message: `A new game could not be created: ${error instanceof Error ? error.message : String(error)}` };
-  }
-
   const store = getStore();
-  const state: GameState = { ...created.state, version: 0 };
-  const saved = await store.saveGame({ ...extractMetadata(state), state, reason: 'new game' }, null);
-  if (!saved.ok) {
+  // Each attempt builds the game afresh, with new persistent identities. The store refuses
+  // to write over an existing save, so a collision is retried with a new id, never resolved
+  // by overwriting. Only a collision is retried: every other failure is returned at once.
+  for (let attempt = 1; attempt <= CREATE_ATTEMPTS; attempt++) {
+    let created;
+    try {
+      created = createNewGame({
+        userId: input.userId,
+        playerName,
+        gameName: name,
+        ...(input.seed ? { seed: input.seed.slice(0, 64) } : {}),
+        difficulty: input.difficulty ?? 'standard',
+        ...(input.startLocationId ? { startLocationId: input.startLocationId } : {}),
+        permadeath: input.permadeath ?? false,
+        endless: input.endless ?? false,
+      });
+    } catch (error) {
+      return { ok: false, code: 'internal_error', message: `A new game could not be created: ${error instanceof Error ? error.message : String(error)}` };
+    }
+
+    const state: GameState = { ...created.state, version: 0 };
+    const saved = await store.saveGame({ ...extractMetadata(state), state, reason: 'new game' }, null);
+    if (saved.ok) {
+      await store.appendAudit({
+        userId: input.userId,
+        gameId: state.gameId,
+        action: 'game.create',
+        ok: true,
+        code: null,
+        day: state.world.day,
+        turn: state.turn,
+        // The seed is deliberately not recorded: the audit trail is shown to the player.
+        detail: `difficulty=${state.config.difficulty} issues=${created.issues.length}`,
+      });
+      return { ok: true, value: saved.value };
+    }
+    if (saved.code === 'conflict' && attempt < CREATE_ATTEMPTS) continue;
     if (saved.code === 'conflict') return { ok: false, code: 'conflict', message: saved.message };
     return { ok: false, code: 'internal_error', message: saved.message };
   }
-  await store.appendAudit({
-    userId: input.userId,
-    gameId: state.gameId,
-    action: 'game.create',
-    ok: true,
-    code: null,
-    day: state.world.day,
-    turn: state.turn,
-    // The seed is deliberately not recorded: the audit trail is shown to the player.
-    detail: `difficulty=${state.config.difficulty} issues=${created.issues.length}`,
-  });
-  return { ok: true, value: saved.value };
+  return { ok: false, code: 'conflict', message: 'A new game could not be given a free id. Try again.' };
 }
 
 export async function loadGame(userId: ID, gameId: ID): Promise<ServiceOutcome<SaveRecord>> {

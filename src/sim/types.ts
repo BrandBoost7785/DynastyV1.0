@@ -1838,6 +1838,13 @@ export interface GameConfig {
   lossConditions: LossCondition[];
   startLocationId: ID;
   worldSeed: string;
+  /**
+   * The seed-derived key the simulation hashes with (market materialisation, locked
+   * missions). It is a function of the world seed only, so same-seed games behave alike.
+   * Saves written before persistent game ids were separated from the seed have none, and
+   * `simulationKey()` falls back to their stored `gameId` for them.
+   */
+  simulationKey?: ID;
   /** Allow permadeath? */
   permadeath: boolean;
   /** Endless mode continues after victory. */

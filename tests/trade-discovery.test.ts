@@ -49,15 +49,19 @@ function runDays(state: GameState, days: number, tag: string, phase = 'days'): v
  *
  * `gameId`, `createdAt`/`updatedAt` and the per-phase `ms` diagnostics are wall-clock
  * and identity observations, not simulation results — the same exclusions the
- * project's own restore/replay test uses. Everything else, economic state included,
- * has to match exactly.
+ * project's own restore/replay test uses. The player id is a random persistent identity,
+ * and the ledger's transaction ids and hashes are salted with the game id, so they are
+ * identity observations too. Their economic content (amounts, balances, days) is still
+ * compared. Everything else, economic state included, has to match exactly.
  */
 function comparable(state: GameState): string {
+  const ledger = state.player.recentTransactions.map((t) => ({ ...t, id: null, integrityHash: null, prevHash: null }));
   return canonicalJson({
     ...state,
     gameId: null,
     createdAt: null,
     updatedAt: null,
+    player: { ...state.player, id: null, transactionChain: null, recentTransactions: ledger },
     diagnostics: state.diagnostics.map((d) => ({ ...d, message: d.message.replace(/ in \d+ ms/, ''), data: undefined })),
   });
 }

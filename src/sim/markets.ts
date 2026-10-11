@@ -54,6 +54,7 @@ import {
   pushNotification,
   round2,
   spendable,
+  simulationKey,
 } from './state';
 import type { CommodityDef, GameState, ID, LocationDef, LocationState, MarketState, ReputationDimension } from './types';
 
@@ -246,7 +247,7 @@ export function materialiseArbitrageSet(state: GameState, commodityId: ID, limit
   let created = 0;
   const candidates = worldReg
     .locationsTrading(commodityId)
-    .map((l) => ({ l, h: parseInt(fnv1aHex(`${state.gameId}|${commodityId}|${l.id}`), 16) }))
+    .map((l) => ({ l, h: parseInt(fnv1aHex(`${simulationKey(state)}|${commodityId}|${l.id}`), 16) }))
     .sort((a, b) => a.h - b.h)
     .slice(0, limit);
   for (const { l } of candidates) {

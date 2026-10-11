@@ -22,7 +22,7 @@ import { getWorldRegistry } from '../engine/registry/world';
 import { evaluateConditions, firstFailure, makeContext } from './conditions';
 import { counter, setCounter, bumpCounter } from './progression';
 import { changeReputation } from './reputation';
-import { creditCash, computeNetWorth, newId, pushNotification, round2 } from './state';
+import { creditCash, computeNetWorth, newId, pushNotification, round2, simulationKey } from './state';
 import type { ReputationDimension } from './types';
 import type { GameState, ID, LocationDef, MissionObjective, MissionState } from './types';
 
@@ -813,7 +813,7 @@ export interface MissionBoard {
 }
 
 export function missionBoard(state: GameState): MissionBoard {
-  const locked = eligibleMissions(state, new Rng(`${state.gameId}:missions:locked:${state.world.day}`))
+  const locked = eligibleMissions(state, new Rng(`${simulationKey(state)}:missions:locked:${state.world.day}`))
     .filter((e) => e.reason !== null)
     .slice(0, 18)
     .map((e) => ({ defId: e.def.id, title: e.def.title, reason: e.reason! }));
