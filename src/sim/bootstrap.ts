@@ -152,7 +152,9 @@ export function createNewGame(opts: NewGameOptions): NewGameResult {
   setCounter(state, 'locations_visited', 1);
   setCounter(state, `visited:${config.startLocationId}`, 1);
   player.progression.milestones.push(`visited:${config.startLocationId}`);
-  player.progression.milestones.push(`started:${seed}`);
+  // A plain marker. The seed is never a milestone: milestones travel to the browser with the
+  // player's progression, and the world seed must not.
+  player.progression.milestones.push('started');
   bumpCounter(state, 'games_started');
   setCounter(state, 'trade_volume', counter(state, 'trade_volume'));
 

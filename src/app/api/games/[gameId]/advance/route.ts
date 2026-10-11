@@ -12,7 +12,7 @@
  */
 import { okJson, readBody, serviceFailure, withGame } from '../../../../../server/api-helpers';
 import { advanceRequestSchema } from '../../../../../server/contracts';
-import { gameStateDto } from '../../../../../server/dto';
+import { gameStateDto, publicSaveMetadata } from '../../../../../server/dto';
 import { advanceTime } from '../../../../../server/services/game-service';
 import { rateLimitHeaders } from '../../../../../server/services/rate-limit';
 
@@ -39,7 +39,7 @@ export async function POST(request: Request, context: { params: Promise<{ gameId
       const { response, state, meta, saved, replayed, rateLimit } = outcome.value;
       const headers = rateLimit ? rateLimitHeaders(rateLimit) : undefined;
       return okJson(
-        { ...response, state: gameStateDto(state), meta, saved, replayed, gameId: game.gameId },
+        { ...response, state: gameStateDto(state), meta: publicSaveMetadata(meta), saved, replayed, gameId: game.gameId },
         request,
         headers ? { headers } : undefined,
       );

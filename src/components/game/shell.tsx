@@ -30,7 +30,7 @@ import { DayReport } from './day-report';
 const ADVANCE_CHOICES = [1, 2, 3, 7, 14, 30];
 
 export function GameShell({ children }: { children: React.ReactNode }) {
-  const { gameId, game, state, meta, loading, error, refresh, advance, isPending } = useGame();
+  const { gameId, state, meta, loading, error, refresh, advance, isPending } = useGame();
   const toast = useToast();
   const pathname = usePathname();
   /*
@@ -261,9 +261,6 @@ export function GameShell({ children }: { children: React.ReactNode }) {
           </span>
           <span>
             Turn <span className="tnum text-ink-dim">{num(meta?.turn ?? 0)}</span>
-          </span>
-          <span className="hidden sm:inline">
-            Seed <span className="tnum text-ink-dim">{game?.meta.worldSeed ?? '—'}</span>
           </span>
           <span className="ml-auto">
             {meta?.status === 'active' ? <StatusDot tone="up" label="Running" /> : <StatusDot tone="warn" label={meta?.status ?? 'unknown'} />}

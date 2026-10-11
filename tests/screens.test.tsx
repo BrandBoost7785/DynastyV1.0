@@ -124,7 +124,6 @@ function meta(version = 7) {
     title: 'Trader',
     netWorth: 12000,
     empireScore: 12,
-    worldSeed: 'seed',
     difficulty: 'standard',
     locationId: 'loc_a',
     incarcerated: false,

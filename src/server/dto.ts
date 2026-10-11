@@ -27,6 +27,7 @@
 import { computeNetWorth, type NetWorthBreakdown } from '../sim/state';
 import type { DayReport, MultiDayReport } from '../sim/tick';
 import type { TradeNetworkView } from '../sim/trade-network';
+import type { AuditRecord, SaveMetadata } from '../persistence/types';
 import type {
   ActiveEvent,
   ActionResult,
@@ -140,7 +141,6 @@ export interface GameConfigDto {
   endless: boolean;
   startLocationId: string;
   startDateLabel: string;
-  worldSeed: string;
   victoryConditions: GameState['config']['victoryConditions'];
   lossConditions: GameState['config']['lossConditions'];
   difficultyModifiers: GameState['config']['difficultyModifiers'];
@@ -251,6 +251,38 @@ export function publicUnderground(state: UndergroundState): PublicUndergroundSta
   };
 }
 
+/**
+ * Progression milestones as a browser may see them. A save written before the world seed
+ * was kept out of the milestone list carries `started:<seed>`; it is shown as the bare
+ * `started` marker, so the list keeps its meaning without the seed.
+ */
+function publicMilestones(milestones: readonly string[]): string[] {
+  return milestones.map((milestone) => (milestone.startsWith('started:') ? 'started' : milestone));
+}
+
+/**
+ * Save metadata as a browser may see it. The world seed is stored with the save row
+ * server-side and is never part of a public read model.
+ */
+export type PublicSaveMetadata = Omit<SaveMetadata, 'worldSeed'>;
+
+export function publicSaveMetadata(meta: SaveMetadata): PublicSaveMetadata {
+  const { worldSeed: _worldSeed, ...rest } = meta;
+  return rest;
+}
+
+/**
+ * An audit row as a browser may see it. Rows written before the seed was kept off the
+ * trail read `seed=<seed> difficulty=… issues=…`. The seed is cut out and everything after
+ * it is kept. A seed-prefixed detail that does not match that shape is withheld whole, so
+ * an unexpected format fails closed instead of leaking.
+ */
+export function publicAuditRow(row: AuditRecord): AuditRecord {
+  if (row.detail === null || !row.detail.startsWith('seed=')) return row;
+  const legacy = /^seed=[\s\S]*(?= difficulty=\S+ issues=\S+$)/.exec(row.detail);
+  return { ...row, detail: legacy ? row.detail.slice(legacy[0].length + 1) : null };
+}
+
 export function publicPlayer(state: PlayerState): PublicPlayerState {
   // `transactionChain` is integrity bookkeeping for the server's own verification; it is
   // deliberately destructured away rather than spread through.
@@ -263,6 +295,7 @@ export function publicPlayer(state: PlayerState): PublicPlayerState {
     netWorthHistory: tail(state.netWorthHistory, DTO_LIMITS.historyPoints),
     progression: {
       ...state.progression,
+      milestones: publicMilestones(state.progression.milestones),
       recentXp: tail(state.progression.recentXp, DTO_LIMITS.xpTrail),
     },
     reputation: {
@@ -375,7 +408,6 @@ export function gameStateDto(state: GameState): GameStateDto {
         endless: state.config.endless,
         startLocationId: state.config.startLocationId,
         startDateLabel: state.config.startDateLabel,
-        worldSeed: state.config.worldSeed,
         victoryConditions: state.config.victoryConditions,
         lossConditions: state.config.lossConditions,
         difficultyModifiers: state.config.difficultyModifiers,
@@ -537,6 +569,9 @@ export const FORBIDDEN_CLIENT_KEYS: readonly string[] = [
   'sqlitePath',
   'accessToken',
   'refreshToken',
+  // The world seed generates the whole world. It is server-side only, under this exact
+  // name everywhere it could be serialised; the public projections never include it.
+  'worldSeed',
 ];
 
 const FORBIDDEN = new Set(FORBIDDEN_CLIENT_KEYS);

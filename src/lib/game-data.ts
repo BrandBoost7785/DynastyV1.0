@@ -1696,7 +1696,7 @@ export interface LocationView {
  * The save's own bookkeeping.
  *
  * Two server shapes reach the client: the state projection's `meta` (identity plus
- * `config`/`lastTickDay`) and a command response's `meta` (the fuller `SaveMetadata`).
+ * `config`/`lastTickDay`) and a command response's `meta` (the fuller `PublicSaveMetadata`).
  * Every field the shell reads is present in both, so one structural type covers the
  * pair without either producer having to change.
  */
@@ -1715,7 +1715,6 @@ export interface GameMeta {
   title?: string;
   netWorth?: number;
   empireScore?: number;
-  worldSeed?: string;
   difficulty?: string;
   locationId?: string;
   incarcerated?: boolean;
@@ -1736,7 +1735,6 @@ export interface GameSummary {
     title: string;
     netWorth: number;
     empireScore: number;
-    worldSeed: string;
     difficulty: string;
     locationId: string;
     incarcerated: boolean;

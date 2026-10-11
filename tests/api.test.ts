@@ -42,6 +42,8 @@ import { POST as restorePost } from '../src/app/api/games/[gameId]/versions/[ver
 import { GET as leaderboardGet } from '../src/app/api/leaderboard/route';
 import { GET as auditGet } from '../src/app/api/audit/route';
 import { GET as healthGet } from '../src/app/api/health/route';
+import { createNewGame } from '../src/sim/bootstrap';
+import { extractMetadata } from '../src/persistence';
 
 /* ------------------------------------------------------------------ */
 /* Harness                                                             */
@@ -1020,5 +1022,111 @@ describe('view pagination defaults', () => {
     // Zero is an explicit request: it means none, not the default.
     expect((await payload<{ player: { notifications: unknown[] } }>(user, game, 'profile', '?notifications=0')).player.notifications.length).toBe(0);
     expect((await payload<{ player: { notifications: unknown[] } }>(user, game, 'profile', '?notifications=1')).player.notifications.length).toBe(1);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* World seed disclosure (route level)                                 */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The seed is the one input that makes the world reproducible, so it must never appear
+ * in a success body. These drive the real route handlers and search each raw response
+ * for the seed text. A search of the bytes, not of one key name, is what catches a copy
+ * under a new name or nested in a list.
+ */
+describe('world seed disclosure', () => {
+  const SEED = 'seed-canary-api-4d2b8e';
+
+  it('never appears in any success body across the game lifecycle', async () => {
+    const user = await newUser();
+    const created = await invoke<{ game: { meta: SaveMetadata }; state: GameStateDto }>(gamesPost as unknown as RouteHandler, '/api/games', {
+      method: 'POST',
+      cookie: user.cookie,
+      body: { playerName: 'Seed Probe', seed: SEED },
+    });
+    expect(created.status).toBe(201);
+    const gameId = created.body.data!.game.meta.gameId;
+    const ctx = { cookie: user.cookie, params: { gameId } };
+
+    const sightings: string[] = [];
+    const inspect = (label: string, result: { raw: string; response: Response }) => {
+      if (result.raw.includes(SEED)) sightings.push(label);
+      expectNoRedaction(result.response, label);
+    };
+    inspect('POST /api/games', created);
+
+    inspect('GET /api/games', await invoke(gamesGet as unknown as RouteHandler, '/api/games', { cookie: user.cookie }));
+    inspect('GET /api/games/:id', await invoke(gameGet as unknown as RouteHandler, `/api/games/${gameId}`, ctx));
+    inspect('GET /api/games/:id/state', await invoke(stateGet as unknown as RouteHandler, `/api/games/${gameId}/state`, ctx));
+
+    const index = await invoke<{ views: { name: string }[] }>(viewsGet as unknown as RouteHandler, `/api/games/${gameId}/views`, ctx);
+    inspect('GET /api/games/:id/views', index);
+    for (const view of index.body.data!.views) {
+      inspect(`GET views/${view.name}`, await invoke(viewGet as unknown as RouteHandler, `/api/games/${gameId}/views/${view.name}`, { ...ctx, params: { gameId, view: view.name } }));
+    }
+
+    const intent = await invoke<{ state: GameStateDto }>(intentPost as unknown as RouteHandler, `/api/games/${gameId}/intent`, {
+      method: 'POST',
+      ...ctx,
+      body: { intent: { type: 'time.advance_day' }, expectedVersion: created.body.data!.state.meta.version, requestId: 'seed-intent-1' },
+    });
+    expect(intent.body.ok, 'the owner can still play').toBe(true);
+    inspect('POST intent time.advance_day', intent);
+
+    const current = await invoke<{ state: GameStateDto }>(stateGet as unknown as RouteHandler, `/api/games/${gameId}/state`, ctx);
+    inspect('GET /api/games/:id/state (after intent)', current);
+    const advanced = await invoke(advancePost as unknown as RouteHandler, `/api/games/${gameId}/advance`, {
+      method: 'POST',
+      ...ctx,
+      body: { days: 1, expectedVersion: current.body.data!.state.meta.version, requestId: 'seed-advance-1' },
+    });
+    expect(advanced.body.ok, `advance failed: ${advanced.body.error?.code ?? 'ok'} ${advanced.body.error?.message ?? ''}`).toBe(true);
+    inspect('POST /advance', advanced);
+
+    inspect('GET /api/games/:id/versions', await invoke(versionsGet as unknown as RouteHandler, `/api/games/${gameId}/versions`, ctx));
+    inspect('GET /api/leaderboard', await invoke(leaderboardGet as unknown as RouteHandler, '/api/leaderboard', { cookie: user.cookie }));
+    inspect('GET /api/audit', await invoke(auditGet as unknown as RouteHandler, '/api/audit', { cookie: user.cookie }));
+
+    expect(sightings, 'world seed appeared in public responses').toEqual([]);
+  });
+
+  it('withholds a seed-bearing milestone that an existing save already carries', async () => {
+    // A save written before this fix holds `started:<seed>` inside its sealed state.
+    // A distinct seed keeps this save's id clear of the other tests' saves.
+    const LEGACY_SEED = 'seed-canary-legacy-91c0';
+    const user = await newUser();
+    const state = createNewGame({ userId: user.userId, playerName: 'Legacy', seed: LEGACY_SEED, gameName: 'Legacy save' }).state;
+    state.player.progression.milestones.push(`started:${LEGACY_SEED}`);
+    const legacy = { ...state, version: 0 };
+    const saved = await store.saveGame({ ...extractMetadata(legacy), state: legacy, reason: 'legacy fixture' }, null);
+    expect(saved.ok).toBe(true);
+
+    const result = await invoke(stateGet as unknown as RouteHandler, `/api/games/${state.gameId}/state`, {
+      cookie: user.cookie,
+      params: { gameId: state.gameId },
+    });
+    expect(result.status).toBe(200);
+    expect(result.raw, 'legacy milestone reached the state response').not.toContain(LEGACY_SEED);
+  });
+
+  it('withholds the seed from an audit row written before this fix', async () => {
+    const user = await newUser();
+    const game = await newGame(user);
+    await store.appendAudit({
+      userId: user.userId,
+      gameId: game.gameId,
+      action: 'game.create',
+      ok: true,
+      code: null,
+      day: 0,
+      turn: 0,
+      detail: `seed=${SEED} difficulty=standard issues=0`,
+    });
+
+    const audit = await invoke<{ rows: { action: string }[] }>(auditGet as unknown as RouteHandler, '/api/audit', { cookie: user.cookie });
+    expect(audit.status).toBe(200);
+    expect(audit.raw, 'legacy audit detail reached the audit response').not.toContain(SEED);
+    expect(audit.body.data!.rows.some((row) => row.action === 'game.create')).toBe(true);
   });
 });

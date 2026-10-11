@@ -12,7 +12,7 @@ import { useCallback, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { api, ApiError, type SessionInfo } from '../../lib/api-client';
-import type { SaveMetadata } from '../../persistence/types';
+import type { PublicSaveMetadata } from '../../server/dto';
 import { invalidate, useQuery } from '../../lib/query';
 import { useToast } from '../ui/toast';
 import { Badge, Button, Checkbox, Field, Input, Panel, Select } from '../ui/primitives';
@@ -20,8 +20,8 @@ import { ConfirmDialog } from '../ui/dialog';
 import { EmptyState, ErrorState, InlineNote, LoadingState } from '../ui/states';
 import { age, humanise, money, num } from '../../lib/format';
 
-/** One row of `GET /api/games` — the server's own `SaveMetadata`. */
-type GameListItem = SaveMetadata;
+/** One row of `GET /api/games` — the server's public save metadata. */
+type GameListItem = PublicSaveMetadata;
 
 const DIFFICULTIES = [
   { id: 'relaxed', label: 'Relaxed', blurb: 'Softer enforcement, cheaper credit, more forgiving events.' },

@@ -17,8 +17,8 @@
  * `error.code === 'conflict'` without parsing prose.
  */
 import type { ApiErrorCode } from '../server/http';
-import type { ActionResultDto, GameStateDto } from '../server/dto';
-import type { SaveMetadata, SaveVersionRow, LeaderboardRow, AuditRecord } from '../persistence/types';
+import type { ActionResultDto, GameStateDto, PublicSaveMetadata } from '../server/dto';
+import type { SaveVersionRow, LeaderboardRow, AuditRecord } from '../persistence/types';
 
 /* ------------------------------------------------------------------ */
 /* Envelope                                                            */
@@ -109,7 +109,7 @@ export interface SessionInfo {
 }
 
 export interface GameSummaryDto {
-  meta: SaveMetadata;
+  meta: PublicSaveMetadata;
   status: string;
   cash: number;
   actionsLeft: number;
@@ -119,7 +119,7 @@ export interface GameSummaryDto {
 export interface IntentResponse extends Omit<ActionResultDto, 'notifications'> {
   notifications: ActionResultDto['notifications'];
   state: GameStateDto;
-  meta: SaveMetadata;
+  meta: PublicSaveMetadata;
   saved: boolean;
   replayed: boolean;
   gameId: string;
@@ -153,7 +153,7 @@ export const api = {
   logout: () => call<{ message: string }>('/api/auth/logout', { body: {} }),
 
   /* games */
-  listGames: () => call<{ games: SaveMetadata[]; count: number }>('/api/games'),
+  listGames: () => call<{ games: PublicSaveMetadata[]; count: number }>('/api/games'),
   createGame: (input: {
     playerName: string;
     gameName?: string;
@@ -163,7 +163,7 @@ export const api = {
     endless?: boolean;
   }) => call<{ game: GameSummaryDto; state: GameStateDto }>('/api/games', { body: input }),
   getGame: (gameId: string) => call<{ game: GameSummaryDto; state: GameStateDto }>(`/api/games/${encodeURIComponent(gameId)}`),
-  getState: (gameId: string) => call<{ state: GameStateDto; meta: SaveMetadata }>(`/api/games/${encodeURIComponent(gameId)}/state`),
+  getState: (gameId: string) => call<{ state: GameStateDto; meta: PublicSaveMetadata }>(`/api/games/${encodeURIComponent(gameId)}/state`),
   deleteGame: (gameId: string) =>
     call<{ gameId: string; deleted: true }>(`/api/games/${encodeURIComponent(gameId)}?confirm=true`, { method: 'DELETE' }),
 

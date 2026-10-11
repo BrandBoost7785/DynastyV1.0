@@ -6,6 +6,7 @@
  * it can never be used to read another account's activity.
  */
 import { failJson, okJson, withUser } from '../../../server/api-helpers';
+import { publicAuditRow } from '../../../server/dto';
 import { getStore } from '../../../persistence';
 
 export const dynamic = 'force-dynamic';
@@ -19,6 +20,7 @@ export async function GET(request: Request): Promise<Response> {
     }
     const rows = await getStore().recentAudit(user.id, limit);
     if (!rows.ok) return failJson('internal_error', rows.message, request);
-    return okJson({ rows: rows.value, count: rows.value.length }, request);
+    const visible = rows.value.map(publicAuditRow);
+    return okJson({ rows: visible, count: visible.length }, request);
   }, { scope: 'audit' });
 }

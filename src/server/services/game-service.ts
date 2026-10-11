@@ -24,7 +24,7 @@ import { rngForAction } from '../../sim/tick';
 import { parseIntent, type ActionIntent } from '../../sim/validation';
 import type { ActionResult, GameState, GameStatus, ID } from '../../sim/types';
 import type { Difficulty } from '../../sim/state';
-import { actionResultDto, DTO_LIMITS, type ActionResultDto } from '../dto';
+import { actionResultDto, DTO_LIMITS, publicSaveMetadata, type ActionResultDto, type PublicSaveMetadata } from '../dto';
 import { ACTION_BUDGET, consume, type RateLimitResult } from './rate-limit';
 import type { ApiErrorCode } from '../http';
 
@@ -81,11 +81,11 @@ export interface IntentOutcome {
 /* Saves                                                               */
 /* ------------------------------------------------------------------ */
 
-export async function listGames(userId: ID): Promise<ServiceOutcome<SaveMetadata[]>> {
+export async function listGames(userId: ID): Promise<ServiceOutcome<PublicSaveMetadata[]>> {
   const store = getStore();
   const result = await store.listGames(userId);
   if (!result.ok) return { ok: false, code: 'internal_error', message: result.message };
-  return { ok: true, value: result.value };
+  return { ok: true, value: result.value.map(publicSaveMetadata) };
 }
 
 export interface CreateGameInput {
@@ -138,7 +138,8 @@ export async function createGame(input: CreateGameInput): Promise<ServiceOutcome
     code: null,
     day: state.world.day,
     turn: state.turn,
-    detail: `seed=${created.seed} difficulty=${state.config.difficulty} issues=${created.issues.length}`,
+    // The seed is deliberately not recorded: the audit trail is shown to the player.
+    detail: `difficulty=${state.config.difficulty} issues=${created.issues.length}`,
   });
   return { ok: true, value: saved.value };
 }
@@ -448,7 +449,7 @@ export async function advanceTime(userId: ID, gameId: ID, days: number, options:
 /* ------------------------------------------------------------------ */
 
 export interface GameSummary {
-  meta: SaveMetadata;
+  meta: PublicSaveMetadata;
   status: GameStatus;
   cash: number;
   actionsLeft: number;
@@ -459,7 +460,7 @@ export interface GameSummary {
 export function summarise(record: SaveRecord): GameSummary {
   const state = record.state;
   return {
-    meta: extractMetadata(state),
+    meta: publicSaveMetadata(extractMetadata(state)),
     status: state.status,
     cash: Math.round(state.player.accounts.reduce((sum, a) => sum + a.balance, 0) * 100) / 100,
     actionsLeft: state.player.stats.actionsToday,

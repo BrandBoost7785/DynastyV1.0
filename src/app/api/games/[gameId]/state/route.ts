@@ -8,7 +8,7 @@
  * `expectedVersion` on its next command.
  */
 import { okJson, withGame } from '../../../../../server/api-helpers';
-import { gameStateDto } from '../../../../../server/dto';
+import { gameStateDto, publicSaveMetadata } from '../../../../../server/dto';
 import { extractMetadata } from '../../../../../persistence/serialize';
 
 export const dynamic = 'force-dynamic';
@@ -16,6 +16,6 @@ export const dynamic = 'force-dynamic';
 export async function GET(request: Request, context: { params: Promise<{ gameId: string }> }): Promise<Response> {
   const { gameId } = await context.params;
   return withGame(request, gameId, async ({ game, requestId }) =>
-    okJson({ state: gameStateDto(game.state), meta: extractMetadata(game.state), requestId }, request),
+    okJson({ state: gameStateDto(game.state), meta: publicSaveMetadata(extractMetadata(game.state)), requestId }, request),
   );
 }

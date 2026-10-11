@@ -299,3 +299,70 @@ describe('final safety net', () => {
     expect(publicEntry.hash).toBe('h1');
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* World seed: never public                                            */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The world seed generates the whole world, so a player who learns it can predict the
+ * generated outcomes. It stays server-side. These tests serialise the public payload the
+ * way `okJson` does (the DTO, then the redaction pass) and search the bytes, so a copy
+ * under any key name, nested anywhere, is caught — not just the one property we named.
+ */
+describe('world seed is never public', () => {
+  const SEED = 'seed-canary-7f3a9c1e';
+
+  /** The bytes a success body carries: the DTO after the redaction pass `okJson` runs. */
+  function wireJson(value: unknown): string {
+    return JSON.stringify(sanitiseForClient(value).value);
+  }
+
+  function seeded(seed = SEED): GameState {
+    return createNewGame({ userId: 'seed-user', playerName: 'Seeded', seed }).state;
+  }
+
+  it('is absent from the public state projection of a new game', () => {
+    const state = seeded();
+    expect(wireJson(gameStateDto(state)), 'world seed reached the public state projection').not.toContain(SEED);
+    expect(findForbiddenKeys(gameStateDto(state))).toEqual([]);
+  });
+
+  it('stays absent from the public projection after the simulation has run', () => {
+    const state = seeded();
+    for (let day = 1; day <= 10; day += 1) advanceDay(state, rngForDay(state, day));
+    expect(wireJson(gameStateDto(state))).not.toContain(SEED);
+  });
+
+  it('is not written into a progression milestone by a new game', () => {
+    const state = seeded();
+    expect(state.player.progression.milestones.filter((m) => m.includes(SEED))).toEqual([]);
+  });
+
+  it('withholds a seed-bearing milestone that an existing save already carries', () => {
+    // Saves written before this fix stored `started:<seed>` inside the sealed state.
+    const state = seeded();
+    state.player.progression.milestones.push(`started:${SEED}`);
+    expect(wireJson(publicPlayer(state.player)), 'legacy milestone reached the public player').not.toContain(SEED);
+    expect(wireJson(gameStateDto(state))).not.toContain(SEED);
+  });
+
+  it('keeps the seed inside the engine, where generation and replay need it', () => {
+    const state = seeded();
+    expect(state.config.worldSeed).toBe(SEED);
+    // The same seed reproduces the same world; a different seed diverges.
+    const again = seeded();
+    expect(again.player.locationId).toBe(state.player.locationId);
+    expect(JSON.stringify(again.world)).toBe(JSON.stringify(state.world));
+    const other = seeded('a-different-seed-9');
+    expect(JSON.stringify(other.world)).not.toBe(JSON.stringify(state.world));
+  });
+
+  it('treats a worldSeed key as forbidden at any depth, and removes it from the wire', () => {
+    expect(findForbiddenKeys({ meta: { config: { worldSeed: SEED } } })).toEqual(['worldSeed']);
+    const cleaned = sanitiseForClient({ list: [{ worldSeed: SEED, name: 'kept' }] });
+    expect(cleaned.removed).toEqual(['worldSeed']);
+    expect(JSON.stringify(cleaned.value)).not.toContain(SEED);
+    expect(JSON.stringify(cleaned.value)).toContain('kept');
+  });
+});

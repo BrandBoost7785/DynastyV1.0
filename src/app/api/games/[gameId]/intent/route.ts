@@ -27,7 +27,7 @@
  */
 import { ensureStore, failJson, okJson, readBody, serviceFailure, withGame } from '../../../../../server/api-helpers';
 import { intentRequestSchema } from '../../../../../server/contracts';
-import { gameStateDto } from '../../../../../server/dto';
+import { gameStateDto, publicSaveMetadata } from '../../../../../server/dto';
 import { performIntent } from '../../../../../server/services/game-service';
 import { rateLimitHeaders } from '../../../../../server/services/rate-limit';
 
@@ -63,7 +63,7 @@ export async function POST(request: Request, context: { params: Promise<{ gameId
       const payload = {
         ...response,
         state: gameStateDto(state),
-        meta,
+        meta: publicSaveMetadata(meta),
         saved,
         replayed,
         gameId: game.gameId,
