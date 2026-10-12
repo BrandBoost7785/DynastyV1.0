@@ -87,14 +87,18 @@ export interface LeaderboardRow {
 
 export interface UserRecord {
   id: ID;
-  email: string;
+  /**
+   * Null for a guest: a guest identity has no address to recover it with, which is what
+   * makes it bound to the browser that holds its session cookie.
+   */
+  email: string | null;
   displayName: string;
   /**
    * scrypt hash for the dev fallback authenticator. Always null when Supabase Auth
    * owns identity — the production adapter never stores a password.
    */
   passwordHash: string | null;
-  authProvider: 'local' | 'supabase';
+  authProvider: 'local' | 'supabase' | 'guest';
   createdAt: string;
   lastSeenAt: string | null;
 }
@@ -173,7 +177,8 @@ export interface GameStore {
   /* ------------------------------- identity ------------------------------ */
   createUser(input: {
     id: ID;
-    email: string;
+    /** Null for a guest. */
+    email: string | null;
     displayName: string;
     passwordHash: string | null;
     authProvider: UserRecord['authProvider'];

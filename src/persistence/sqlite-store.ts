@@ -35,7 +35,9 @@ create table if not exists schema_migrations (
 
 create table if not exists profiles (
   id text primary key,
-  email text not null unique,
+  -- Nullable since guest identities (0004): a guest has no address. UNIQUE still holds for
+  -- every real address, because SQLite treats each NULL as distinct.
+  email text unique,
   display_name text not null,
   auth_provider text not null default 'local',
   password_hash text,
@@ -131,6 +133,49 @@ create index if not exists intent_receipts_created_idx on intent_receipts (game_
 
 type Row = Record<string, string | number | null | Uint8Array>;
 
+/**
+ * Upgrade a database created before guest identities, where `profiles.email` was NOT NULL.
+ *
+ * `create table if not exists` cannot change an existing table, so the table is rebuilt:
+ * copy every row, drop the old table, rename the new one. It runs in one transaction with
+ * foreign keys off (SQLite cannot change that inside a transaction), and the foreign-key
+ * check must come back clean before the change is committed. A database already on the new
+ * shape is left alone, so this is safe to run on every boot.
+ */
+function upgradeProfilesEmailNullable(db: DatabaseSync): void {
+  const columns = db.prepare('pragma table_info(profiles)').all() as { name: string; notnull: number }[];
+  const email = columns.find((column) => column.name === 'email');
+  if (!email || email.notnull === 0) return;
+
+  db.exec('pragma foreign_keys = off;');
+  try {
+    db.exec('begin immediate;');
+    db.exec(`
+      create table profiles_upgraded (
+        id text primary key,
+        email text unique,
+        display_name text not null,
+        auth_provider text not null default 'local',
+        password_hash text,
+        created_at text not null,
+        last_seen_at text
+      );
+      insert into profiles_upgraded (id, email, display_name, auth_provider, password_hash, created_at, last_seen_at)
+        select id, email, display_name, auth_provider, password_hash, created_at, last_seen_at from profiles;
+      drop table profiles;
+      alter table profiles_upgraded rename to profiles;
+    `);
+    const violations = db.prepare('pragma foreign_key_check').all();
+    if (violations.length > 0) throw new Error(`profiles upgrade left ${violations.length} foreign key violation(s); rolled back`);
+    db.exec('commit;');
+  } catch (error) {
+    db.exec('rollback;');
+    throw error;
+  } finally {
+    db.exec('pragma foreign_keys = on;');
+  }
+}
+
 /** Returned when a new game's id is already taken. The caller retries with a new id. */
 const SAVE_ID_IN_USE = 'That save id is already in use. Create the game again to receive a new id.';
 
@@ -161,7 +206,7 @@ function asMetadata(row: Row): SaveMetadata {
 function asUser(row: Row): UserRecord {
   return {
     id: String(row.id),
-    email: String(row.email),
+    email: row.email === null || row.email === undefined ? null : String(row.email),
     displayName: String(row.display_name),
     passwordHash: (row.password_hash as string | null) ?? null,
     authProvider: (row.auth_provider as UserRecord['authProvider']) ?? 'local',
@@ -194,8 +239,13 @@ export class SqliteStore implements GameStore {
     db.exec('pragma synchronous = normal;');
     db.exec('pragma foreign_keys = on;');
     db.exec(DDL);
+    upgradeProfilesEmailNullable(db);
+    const applied = new Date().toISOString();
     db.prepare(`insert into schema_migrations (id, applied_at, checksum) values ('0001_initial_schema', ?, 'sqlite-dev')
-                on conflict (id) do nothing`).run(new Date().toISOString());
+                on conflict (id) do nothing`).run(applied);
+    // Mirrors supabase/migrations/0004_guest_identity.sql: nullable email, 'guest' provider.
+    db.prepare(`insert into schema_migrations (id, applied_at, checksum) values ('0004_guest_identity', ?, 'sqlite-dev')
+                on conflict (id) do nothing`).run(applied);
     this.db = db;
   }
 
@@ -221,14 +271,15 @@ export class SqliteStore implements GameStore {
 
   /* ------------------------------- identity ------------------------------ */
 
-  async createUser(input: { id: ID; email: string; displayName: string; passwordHash: string | null; authProvider: UserRecord['authProvider'] }): Promise<StoreResult<UserRecord>> {
+  async createUser(input: { id: ID; email: string | null; displayName: string; passwordHash: string | null; authProvider: UserRecord['authProvider'] }): Promise<StoreResult<UserRecord>> {
     try {
       await this.init();
       const now = new Date().toISOString();
+      const email = input.email === null ? null : input.email.toLowerCase();
       this.require()
         .prepare('insert into profiles (id, email, display_name, auth_provider, password_hash, created_at) values (?, ?, ?, ?, ?, ?)')
-        .run(input.id, input.email.toLowerCase(), input.displayName, input.authProvider, input.passwordHash, now);
-      return ok({ ...input, email: input.email.toLowerCase(), createdAt: now, lastSeenAt: null });
+        .run(input.id, email, input.displayName, input.authProvider, input.passwordHash, now);
+      return ok({ ...input, email, createdAt: now, lastSeenAt: null });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes('UNIQUE')) return err('duplicate', 'An account with that email already exists.');

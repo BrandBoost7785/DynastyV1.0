@@ -84,8 +84,9 @@ export default function SavePage() {
       } catch (error) {
         const apiError = error instanceof ApiError ? error : new ApiError('internal_error', 'The restore could not be completed.', 0);
         if (apiError.status === 401 || apiError.code === 'not_authenticated') {
-          toast.push({ tone: 'warning', title: 'Session expired', body: 'Sign in again to restore this save.' });
-          router.push(`/login?next=${encodeURIComponent(`/games/${gameId}/save`)}`);
+          // The guest session has ended. Go to the library, where the way back in is shown.
+          toast.push({ tone: 'warning', title: 'Session ended', body: 'Start a new guest session to restore this save. Saves from an ended session cannot be reopened.' });
+          router.push('/games');
           return;
         }
         if (apiError.status === 409 || apiError.code === 'conflict') {

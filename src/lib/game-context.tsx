@@ -18,7 +18,6 @@
  *     It never silently overwrites a newer state.
  */
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
-import { useRouter } from 'next/navigation';
 import { ApiError, api, newRequestId, type IntentResponse, type SessionInfo } from './api-client';
 import { clearAllQueries, DEFAULT_STALE_MS, getQueryData, invalidate, refetchQuery, setQueryData, useQuery } from './query';
 import { useToast } from '../components/ui/toast';
@@ -33,8 +32,9 @@ interface SessionApi {
   loading: boolean;
   error: ApiError | null;
   refresh: () => Promise<void>;
-  signIn: (email: string, password: string) => Promise<void>;
-  signUp: (email: string, password: string, displayName: string) => Promise<void>;
+  /** Start a guest session on this browser, or resume the one it already holds. */
+  startGuest: () => Promise<void>;
+  /** End this browser's session. Final for a guest: the save cannot be reopened elsewhere. */
   signOut: () => Promise<void>;
 }
 
@@ -54,32 +54,21 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     await refetchQuery('session', () => api.session());
   }, []);
 
-  const signIn = useCallback(
-    async (email: string, password: string) => {
-      await api.login({ email, password });
-      clearAllQueries();
-      await refresh();
-    },
-    [refresh],
-  );
-
-  const signUp = useCallback(
-    async (email: string, password: string, displayName: string) => {
-      await api.register({ email, password, displayName });
-      clearAllQueries();
-      await refresh();
-    },
-    [refresh],
-  );
+  const startGuest = useCallback(async () => {
+    await api.guest();
+    clearAllQueries();
+    await refresh();
+  }, [refresh]);
 
   const signOut = useCallback(async () => {
     await api.logout();
     clearAllQueries();
-  }, []);
+    await refresh();
+  }, [refresh]);
 
   const value = useMemo<SessionApi>(
-    () => ({ session: query.data ?? null, loading: query.loading, error: query.error, refresh, signIn, signUp, signOut }),
-    [query.data, query.error, query.loading, refresh, signIn, signOut, signUp],
+    () => ({ session: query.data ?? null, loading: query.loading, error: query.error, refresh, startGuest, signOut }),
+    [query.data, query.error, query.loading, refresh, startGuest, signOut],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
@@ -169,7 +158,6 @@ export function useGame(): GameApi {
 }
 
 export function GameProvider({ gameId, children }: { gameId: string; children: ReactNode }) {
-  const router = useRouter();
   const toast = useToast();
   const [state, setState] = useState<GameStateDto | null>(null);
   const [meta, setMeta] = useState<GameMeta | null>(null);
@@ -181,6 +169,7 @@ export function GameProvider({ gameId, children }: { gameId: string; children: R
 
   const gameKey = `game:${gameId}`;
   const query = useQuery<GamePayload>(gameKey, () => api.getGame(gameId), { staleTime: 5_000 });
+  const { refresh: refreshSession } = useSession();
 
   /*
    * Adopt the server's projection.
@@ -266,8 +255,11 @@ export function GameProvider({ gameId, children }: { gameId: string; children: R
           const apiError = toApiError(error);
           if (apiError.status === 401 || apiError.code === 'not_authenticated') {
             clearAllQueries();
-            toast.push({ tone: 'warning', title: 'Session expired', body: 'Sign in again to pick up where you left off.' });
-            router.push(`/login?next=${encodeURIComponent(`/games/${gameId}`)}`);
+            // The guest session on this browser has ended. Nothing redirects: the session is
+            // re-read, and the page shows the way back in (a new guest session) in place.
+            toast.push({ tone: 'warning', title: 'Session ended', body: 'This guest session is no longer active on this browser. Start a new one to keep playing.' });
+            clearAllQueries();
+            void refreshSession();
             return { ok: false, code: 'not_authenticated', message: apiError.message, stale: true };
           }
           if (apiError.status === 409 || apiError.code === 'conflict') {
@@ -295,7 +287,7 @@ export function GameProvider({ gameId, children }: { gameId: string; children: R
       setBusy(true);
       return flight;
     },
-    [apply, gameId, refresh, router, state, toast],
+    [apply, gameId, refresh, refreshSession, state, toast],
   );
 
   const run = useCallback<GameApi['run']>((intent, options) => submit('intent', intent, options), [submit]);

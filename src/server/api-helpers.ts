@@ -19,6 +19,50 @@ export interface HandlerContext {
   requestId: string;
 }
 
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/**
+ * Refuse a state-changing request that a foreign page sent.
+ *
+ * The session cookie is SameSite=Lax, which already stops a cross-site form post from
+ * carrying it. This is the second, explicit layer, and it runs before authentication and
+ * before any rate-limit or database work, so a refused request has no side effect.
+ *
+ *  - `Sec-Fetch-Site: cross-site` is refused outright.
+ *  - `Sec-Fetch-Site: same-origin` is accepted. The browser decided that from the URL it
+ *    actually used, and a page cannot forge the header. This is what keeps a request
+ *    working behind a proxy that rewrites the Host it arrives under.
+ *  - Otherwise an `Origin` header must name the host the request was sent to. `null`
+ *    (sandboxed or opaque origins) is refused.
+ *  - No `Origin` at all is allowed: curl, server-to-server calls and the test harness send
+ *    none, and the cookie rule above still applies to them.
+ *
+ * Safe methods are never checked, so reads from any origin behave as before.
+ */
+export function crossOriginRefusal(request: Request): Response | null {
+  if (!UNSAFE_METHODS.has(request.method.toUpperCase())) return null;
+  const refuse = () =>
+    failJson('forbidden_origin', 'This request came from a page that is not this game, so it was refused.', request, { status: 403 });
+
+  const fetchSite = request.headers.get('sec-fetch-site');
+  if (fetchSite === 'cross-site') return refuse();
+  if (fetchSite === 'same-origin') return null;
+
+  const origin = request.headers.get('origin');
+  if (origin === null) return null;
+  if (origin === 'null') return refuse();
+
+  let originHost: string;
+  try {
+    originHost = new URL(origin).host.toLowerCase();
+  } catch {
+    return refuse();
+  }
+  const forwarded = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
+  const expectedHost = (forwarded || request.headers.get('host') || new URL(request.url).host).toLowerCase();
+  return originHost === expectedHost ? null : refuse();
+}
+
 /**
  * Run a handler with authentication, read-rate limiting and error isolation.
  *
@@ -31,6 +75,8 @@ export async function withUser(
   options: { budget?: RateLimitBudget; scope?: string } = {},
 ): Promise<Response> {
   const requestId = requestIdOf(request);
+  const foreign = crossOriginRefusal(request);
+  if (foreign) return foreign;
   try {
     const auth = await resolveUser(request);
     // Supabase may have refreshed the session cookies while resolving; they must go
@@ -65,6 +111,8 @@ export async function withAnonymous(
   options: { budget?: RateLimitBudget; scope?: string } = {},
 ): Promise<Response> {
   const requestId = requestIdOf(request);
+  const foreign = crossOriginRefusal(request);
+  if (foreign) return foreign;
   try {
     const limit = consume(`${clientKey(request)}:${options.scope ?? 'anonymous'}`, options.budget ?? READ_BUDGET);
     if (!limit.allowed) {

@@ -6,7 +6,7 @@
  * live client of the API — but nothing it renders is client-authoritative.
  */
 import type { Metadata } from 'next';
-import { AuthGate } from '../../../components/auth/auth-gate';
+import { GuestGate } from '../../../components/auth/guest-gate';
 import { GameProvider } from '../../../lib/game-context';
 import { GameShell } from '../../../components/game/shell';
 
@@ -15,10 +15,10 @@ export const metadata: Metadata = { title: 'Dynasty' };
 export default async function GameLayout({ children, params }: { children: React.ReactNode; params: Promise<{ gameId: string }> }) {
   const { gameId } = await params;
   return (
-    <AuthGate>
+    <GuestGate>
       <GameProvider gameId={gameId}>
         <GameShell>{children}</GameShell>
       </GameProvider>
-    </AuthGate>
+    </GuestGate>
   );
 }

@@ -102,7 +102,7 @@ async function call<T>(path: string, options: RequestOptions = {}): Promise<T> {
 
 export interface SessionInfo {
   authenticated: boolean;
-  user?: { id: string; email: string; displayName: string; provider: 'local' | 'supabase' };
+  user?: { id: string; /** Null for a guest. */ email: string | null; displayName: string; provider: 'local' | 'supabase' | 'guest' };
   auth: 'local' | 'supabase';
   environment: string;
   requestId: string;
@@ -148,8 +148,8 @@ export interface IntentRequestOptions {
 export const api = {
   /* auth */
   session: () => call<SessionInfo>('/api/auth/session'),
-  register: (input: { email: string; password: string; displayName: string }) => call<{ userId: string; displayName: string }>('/api/auth/register', { body: input }),
-  login: (input: { email: string; password: string }) => call<{ userId: string; displayName: string }>('/api/auth/login', { body: input }),
+  /** Start a guest session, or resume this browser's. Sends nothing identifying. */
+  guest: () => call<{ userId: string; displayName: string; created: boolean; message?: string }>('/api/auth/guest', { body: {} }),
   logout: () => call<{ message: string }>('/api/auth/logout', { body: {} }),
 
   /* games */

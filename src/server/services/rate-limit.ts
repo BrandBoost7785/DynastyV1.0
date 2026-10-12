@@ -33,6 +33,12 @@ export interface RateLimitBudget {
 
 export const READ_BUDGET: RateLimitBudget = { limit: B.api.rateLimitMaxRequests, windowMs: B.api.rateLimitWindowMs };
 export const ACTION_BUDGET: RateLimitBudget = { limit: B.api.actionRateLimitMaxRequests, windowMs: B.api.actionRateLimitWindowMs };
+/**
+ * Starting a new guest identity. Generous enough for a household behind one address, tight
+ * enough that a script cannot mint identities in bulk. A resumed session costs nothing here
+ * because it is answered without creating a row (see startGuest).
+ */
+export const GUEST_BUDGET: RateLimitBudget = { limit: 30, windowMs: 60 * 60 * 1000 };
 
 export interface RateLimitResult {
   allowed: boolean;

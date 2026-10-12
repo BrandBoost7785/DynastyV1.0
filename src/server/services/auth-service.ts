@@ -5,13 +5,13 @@
  * signed-cookie path. Route handlers call these three functions and never branch on
  * the provider themselves, which is what keeps the two paths from drifting apart.
  */
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { getEnv } from '../../config/env';
 import { getStore } from '../../persistence';
 import { hashPassword, passwordProblems, verifyPassword } from '../auth/passwords';
-import { SESSION_COOKIE, issueSessionToken, sessionCookieOptions } from '../auth/tokens';
+import { SESSION_COOKIE, issueSessionToken, randomId, sessionCookieOptions } from '../auth/tokens';
 import { supabaseSignIn, supabaseSignOut, supabaseSignUp } from '../auth/supabase';
-import type { CookieToSet } from '../auth';
+import { resolveUser, type CookieToSet } from '../auth';
 import { serializeCookie } from '../api-helpers';
 
 export interface RegisterInput {
@@ -167,6 +167,51 @@ async function startLocalSession(userId: string, request: Request): Promise<{ se
   }
   const options = sessionCookieOptions(Math.floor(SESSION_TTL_MS / 1000));
   return { setCookies: [serializeCookie(SESSION_COOKIE, issued.token, options)], sessionId: issued.payload.sid };
+}
+
+export interface GuestOutcome {
+  ok: boolean;
+  /** True when a new guest was created; false when a valid guest session was resumed. */
+  created: boolean;
+  userId?: string;
+  displayName?: string;
+  message?: string;
+  setCookies: string[];
+}
+
+/**
+ * Start a guest session, or resume the one this browser already holds.
+ *
+ * Idempotent by design. A request that already carries a valid guest session gets that same
+ * identity back and no new row, so a reload, a double click or a second tab cannot mint
+ * extra guests or orphan a save. Only a request with no usable session creates an identity,
+ * and the id is generated here, never taken from the request.
+ *
+ * The guest has no email and no password. Its credential is the signed session cookie, which
+ * is only ever delivered in Set-Cookie, never in the body.
+ */
+export async function startGuest(request: Request): Promise<GuestOutcome> {
+  const existing = await resolveUser(request);
+  if (existing.ok && existing.user.provider === 'guest') {
+    return {
+      ok: true,
+      created: false,
+      userId: existing.user.id,
+      displayName: existing.user.displayName,
+      message: 'Resumed your guest session.',
+      setCookies: existing.cookies.map((c) => serializeCookie(c.name, c.value, c.options ?? {})),
+    };
+  }
+
+  const store = getStore();
+  const userId = randomId('gst');
+  const displayName = `Guest ${randomBytes(2).toString('hex').toUpperCase()}`;
+  const created = await store.createUser({ id: userId, email: null, displayName, passwordHash: null, authProvider: 'guest' });
+  if (!created.ok) return { ok: false, created: false, message: created.message, setCookies: [] };
+
+  await store.appendAudit({ userId, gameId: null, action: 'auth.guest', ok: true, code: null, day: 0, turn: 0, detail: null });
+  const session = await startLocalSession(userId, request);
+  return { ok: true, created: true, userId, displayName, message: 'Guest session started.', setCookies: session.setCookies };
 }
 
 export async function logout(userId: string, request: Request): Promise<AuthOutcome> {

@@ -97,7 +97,7 @@ export function describeError(error: ApiError | null): { title: string; detail: 
   if (!error) return { title: 'The request could not be completed.', detail: null };
   const code = error.code;
   const map: Record<string, string> = {
-    not_authenticated: 'Your session has expired. Sign in again to continue.',
+    not_authenticated: 'This guest session has ended. Start a new one to keep playing.',
     not_found: 'That record no longer exists — it may have been deleted in another session.',
     conflict: 'The game moved on while you were looking at it. Reload to see the current position.',
     save_conflict: 'Your command was based on an older save version, so it was refused rather than applied twice.',

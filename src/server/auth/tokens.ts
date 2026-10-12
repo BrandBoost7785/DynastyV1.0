@@ -102,7 +102,7 @@ export function verifySessionToken(token: string | null | undefined): TokenVerif
     return { ok: false, reason: 'malformed', message: 'Session token payload is missing required fields.' };
   }
   if (payload.exp <= Date.now()) {
-    return { ok: false, reason: 'expired', message: 'Your session expired. Sign in again.' };
+    return { ok: false, reason: 'expired', message: 'Your session has ended. Start a new guest session to keep playing.' };
   }
   return { ok: true, payload };
 }

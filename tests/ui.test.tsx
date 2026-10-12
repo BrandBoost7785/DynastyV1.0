@@ -47,7 +47,8 @@ import { clearAllQueries } from '../src/lib/query';
 import { CommandButton } from '../src/components/game/view-panel';
 import { GameShell } from '../src/components/game/shell';
 import { NAV_ITEMS } from '../src/components/game/nav';
-import { AuthForm } from '../src/components/auth/auth-form';
+import { PlayAsGuest } from '../src/components/auth/guest-entry';
+import { GuestGate } from '../src/components/auth/guest-gate';
 import { ApiError } from '../src/lib/api-client';
 
 interface Route {
@@ -355,63 +356,118 @@ describe('dialog and toast behaviour', () => {
 /* Forms                                                              */
 /* ------------------------------------------------------------------ */
 
-describe('authentication form', () => {
-  it('submits what was typed and moves to the games list', async () => {
-    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: { ok: true, requestId: 'r', data: { authenticated: false, auth: 'local', environment: 'test', requestId: 'r' } } });
-    routes.push({ match: (url) => url.endsWith('/api/auth/login'), body: { ok: true, requestId: 'r', data: { userId: 'u_test' } } });
-    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: sessionEnvelope });
+const anonymousEnvelope = { ok: true, requestId: 'r', data: { authenticated: false, auth: 'local', environment: 'test', requestId: 'r' } };
+const guestEnvelope = {
+  ok: true,
+  requestId: 'req_test',
+  data: { authenticated: true, user: { id: 'gst_test', email: null, displayName: 'Guest 1A2B', provider: 'guest' }, auth: 'local', environment: 'test', requestId: 'req_test' },
+};
+
+describe('guest entry', () => {
+  it('starts a guest session with one request that carries no identity, then goes to the library', async () => {
+    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: anonymousEnvelope });
+    routes.push({ match: (url) => url.endsWith('/api/auth/guest'), status: 201, body: { ok: true, requestId: 'r', data: { userId: 'gst_test', displayName: 'Guest 1A2B', created: true } } });
 
     render(
       <ToastProvider>
         <SessionProvider>
-          <AuthForm mode="login" />
+          <PlayAsGuest />
         </SessionProvider>
       </ToastProvider>,
     );
+    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: guestEnvelope });
 
-    fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'tester@example.com' } });
-    fireEvent.change(screen.getByLabelText(/password/i), { target: { value: 'Correct-Horse-Battery-9' } });
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
-
+    fireEvent.click(screen.getByRole('button', { name: 'Play as Guest' }));
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith('/games'));
-    const login = calls.find((call) => call.url.endsWith('/api/auth/login'));
-    expect(login).toBeDefined();
-    expect(JSON.parse(String(login!.init!.body))).toEqual({ email: 'tester@example.com', password: 'Correct-Horse-Battery-9' });
-    // The browser never asserts identity: the cookie comes back from the server.
-    expect(login!.init!.credentials).toBe('include');
+
+    const start = calls.filter((call) => call.url.endsWith('/api/auth/guest'));
+    expect(start).toHaveLength(1);
+    expect(start[0]!.init!.method).toBe('POST');
+    expect(String(start[0]!.init!.body)).toBe('{}');
+    expect(start[0]!.init!.credentials).toBe('include');
+    // Nothing that looks like a credential or an identity is ever typed or sent.
+    expect(calls.some((call) => call.url.includes('/api/auth/login') || call.url.includes('/api/auth/register'))).toBe(false);
   });
 
-  it('explains a rejected sign-in in words, without leaking the raw code', async () => {
-    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: { ok: true, requestId: 'r', data: { authenticated: false, auth: 'local', environment: 'test', requestId: 'r' } } });
-    routes.push({ match: (url) => url.endsWith('/api/auth/login'), status: 401, body: { ok: false, error: { code: 'not_authenticated', message: 'Those credentials were not accepted.' }, requestId: 'r' } });
+  it('explains a refused guest start in words, and does not navigate', async () => {
+    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: anonymousEnvelope });
+    routes.push({ match: (url) => url.endsWith('/api/auth/guest'), status: 429, body: { ok: false, error: { code: 'rate_limited', message: 'Too many requests.' }, requestId: 'r' } });
 
     render(
       <ToastProvider>
         <SessionProvider>
-          <AuthForm mode="login" />
+          <PlayAsGuest />
         </SessionProvider>
       </ToastProvider>,
     );
-    fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'tester@example.com' } });
-    fireEvent.change(screen.getByLabelText(/password/i), { target: { value: 'wrong-password' } });
-    fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
-
+    fireEvent.click(screen.getByRole('button', { name: 'Play as Guest' }));
     const alert = await screen.findByRole('alert');
-    expect(alert.textContent ?? '').toMatch(/not accepted/i);
+    expect(alert.textContent ?? '').toMatch(/Too many new guest sessions/);
     expect(pushMock).not.toHaveBeenCalled();
   });
 
-  it('asks for a display name only when registering', () => {
-    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: { ok: true, requestId: 'r', data: { authenticated: false, auth: 'local', environment: 'test', requestId: 'r' } } });
+  it('shows the way in, in place, to an anonymous visitor on a protected screen, and never redirects', async () => {
+    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: anonymousEnvelope });
+
     render(
       <ToastProvider>
         <SessionProvider>
-          <AuthForm mode="register" />
+          <GuestGate>
+            <p>protected content</p>
+          </GuestGate>
         </SessionProvider>
       </ToastProvider>,
     );
-    expect(screen.getByLabelText(/display name/i)).not.toBeNull();
-    expect(screen.getByRole('button', { name: /create account/i })).not.toBeNull();
+    expect(await screen.findByRole('button', { name: 'Play as Guest' })).not.toBeNull();
+    expect(screen.queryByText('protected content')).toBeNull();
+    expect(pushMock).not.toHaveBeenCalled();
+    // The screen is reachable by its own URL, so nothing about it sends a visitor elsewhere.
+    expect(screen.queryByRole('link', { name: /sign in|log in|register|create account/i })).toBeNull();
+  });
+
+  it('renders the protected content for an authenticated guest', async () => {
+    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: guestEnvelope });
+
+    render(
+      <ToastProvider>
+        <SessionProvider>
+          <GuestGate>
+            <p>protected content</p>
+          </GuestGate>
+        </SessionProvider>
+      </ToastProvider>,
+    );
+    expect(await screen.findByText('protected content')).not.toBeNull();
+    expect(screen.queryByRole('button', { name: 'Play as Guest' })).toBeNull();
+  });
+});
+
+describe('guest sign-out', () => {
+  it('asks for confirmation with the consequence stated before it ends the session', async () => {
+    routes.push({ match: (url) => url.endsWith('/api/auth/session'), body: guestEnvelope });
+    routes.push({ match: (url) => url.endsWith('/api/games/g_test'), body: stateEnvelope(1) });
+    routes.push({ match: (url) => url.endsWith('/api/auth/logout'), body: { ok: true, requestId: 'r', data: { message: 'Signed out.' } } });
+    routes.push({ match: (url) => url.endsWith('/views/travel'), body: { ok: true, requestId: 'r', data: { view: 'travel', day: 3, turn: 1, version: 1, locationId: 'loc_a', data: null } } });
+    routes.push({ match: (url) => url.endsWith('/views/location'), body: { ok: true, requestId: 'r', data: { view: 'location', day: 3, turn: 1, version: 1, locationId: 'loc_a', data: { id: 'loc_a', name: 'Bharat Metro' } } } });
+    routes.push({ match: (url) => url.endsWith('/views/world'), body: { ok: true, requestId: 'r', data: { view: 'world', day: 3, turn: 1, version: 1, locationId: 'loc_a', data: { indicators: {}, world: { activeEvents: [] } } } } });
+
+    render(
+      <GameHarness>
+        <GameShell>
+          <p>screen body</p>
+        </GameShell>
+      </GameHarness>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: 'End guest session' }));
+    const warning = screen.getByRole('group', { name: 'Confirm ending the session' });
+    expect(warning.textContent ?? '').toMatch(/cannot be recovered/i);
+    // Nothing is sent until the player confirms.
+    expect(calls.some((call) => call.url.endsWith('/api/auth/logout'))).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Keep playing' }));
+    expect(screen.queryByRole('group', { name: 'Confirm ending the session' })).toBeNull();
+    expect(calls.some((call) => call.url.endsWith('/api/auth/logout'))).toBe(false);
   });
 });
 

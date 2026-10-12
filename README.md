@@ -92,8 +92,9 @@ CLIENT → AUTH → API ROUTES → APPLICATION SERVICES → AUTHORITATIVE INTENT
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/health` | Liveness, schema version, driver and configuration presence flags (never values). |
-| `POST` | `/api/auth/register` | Create an account and start a session. |
-| `POST` | `/api/auth/login` | Exchange credentials for a session cookie. |
+| `POST` | `/api/auth/guest` | Start a guest session, or resume this browser's. Idempotent; no body; the credential is an HttpOnly cookie. Rate limited per client. |
+| `POST` | `/api/auth/register` | Create an account and start a session. API only; the player UI no longer offers it. |
+| `POST` | `/api/auth/login` | Exchange credentials for a session cookie. API only; the player UI no longer offers it. |
 | `POST` | `/api/auth/logout` | Revoke every session for the account. |
 | `GET` | `/api/auth/session` | Who is signed in; `200` with `authenticated: false` for visitors. |
 | `GET` | `/api/games` | The account's saves. |

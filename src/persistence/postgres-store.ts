@@ -88,7 +88,7 @@ function asMetadata(row: Row): SaveMetadata {
 function asUser(row: Row): UserRecord {
   return {
     id: str(row.id),
-    email: str(row.email),
+    email: row.email === null || row.email === undefined ? null : str(row.email),
     displayName: str(row.display_name),
     passwordHash: (row.password_hash as string | null) ?? null,
     authProvider: (str(row.auth_provider, 'supabase') as UserRecord['authProvider']),
@@ -220,19 +220,20 @@ export class PostgresStore implements GameStore {
 
   /* ------------------------------- identity ------------------------------ */
 
-  async createUser(input: { id: ID; email: string; displayName: string; passwordHash: string | null; authProvider: UserRecord['authProvider'] }): Promise<StoreResult<UserRecord>> {
+  async createUser(input: { id: ID; email: string | null; displayName: string; passwordHash: string | null; authProvider: UserRecord['authProvider'] }): Promise<StoreResult<UserRecord>> {
     try {
       const pool = this.requirePool();
+      const email = input.email === null ? null : input.email.toLowerCase();
       const result = await pool.query(
         `insert into public.profiles (id, email, display_name, auth_provider, password_hash)
          values ($1, $2, $3, $4, $5)
          on conflict (id) do nothing
          returning *`,
-        [input.id, input.email.toLowerCase(), input.displayName, input.authProvider, input.passwordHash],
+        [input.id, email, input.displayName, input.authProvider, input.passwordHash],
       );
       if (!result.rowCount) {
-        const existing = await this.findUserByEmail(input.email);
-        if (existing.ok && existing.value) return err('duplicate', 'An account with that email already exists.');
+        const existing = email === null ? null : await this.findUserByEmail(email);
+        if (existing && existing.ok && existing.value) return err('duplicate', 'An account with that email already exists.');
         return err('duplicate', 'That account already exists.');
       }
       return ok(asUser(result.rows[0] as Row));

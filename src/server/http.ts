@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import type { GameErrorCode } from '../sim/types';
 import { sanitiseForClient } from './dto';
 
-export type ApiErrorCode = GameErrorCode | 'payload_too_large' | 'unsupported_method' | 'service_unavailable';
+export type ApiErrorCode = GameErrorCode | 'payload_too_large' | 'unsupported_method' | 'service_unavailable' | 'forbidden_origin';
 
 export interface ApiError {
   code: ApiErrorCode;
@@ -45,6 +45,7 @@ export const STATUS_FOR_CODE: Partial<Record<ApiErrorCode, number>> = {
   payload_too_large: 413,
   not_authenticated: 401,
   action_not_permitted: 403,
+  forbidden_origin: 403,
   illegal_in_jurisdiction: 403,
   locked: 403,
   unlocked_required: 403,

@@ -260,6 +260,41 @@ describePg('game identity on PostgreSQL', () => {
     if (!loaded.ok) expect(loaded.code).toBe('state_corrupt');
   });
 
+  /**
+   * Guest identities (migration 0004): a profile with no email, which the database must
+   * accept, and which owns its saves exactly as any account does.
+   */
+  it('stores a guest with no email, and keeps its saves private to it', async () => {
+    const guestId = `gst_${randomBytes(8).toString('base64url')}`;
+    users.push(guestId);
+    const created = await store.createUser({ id: guestId, email: null, displayName: 'Guest PG', passwordHash: null, authProvider: 'guest' });
+    expect(created.ok).toBe(true);
+    if (created.ok) {
+      expect(created.value.email).toBeNull();
+      expect(created.value.authProvider).toBe('guest');
+    }
+    const row = await admin.query('select email, auth_provider from public.profiles where id = $1', [guestId]);
+    expect(row.rows[0]?.email).toBeNull();
+    expect(row.rows[0]?.auth_provider).toBe('guest');
+
+    const other = await newUser('Other');
+    const game = await createGame({ userId: guestId, playerName: 'Guest', seed: 'pg-guest-owned' });
+    expect(game.ok).toBe(true);
+    if (!game.ok) return;
+    const own = await loadGame(guestId, game.value.state.gameId);
+    expect(own.ok).toBe(true);
+    const intruder = await loadGame(other, game.value.state.gameId);
+    expect(intruder.ok).toBe(false);
+  });
+
+  it('keeps the database’s provider check: an unknown provider is refused', async () => {
+    const id = `gst_${randomBytes(8).toString('base64url')}`;
+    users.push(id);
+    await expect(
+      admin.query("insert into public.profiles (id, email, display_name, auth_provider) values ($1, null, 'x', 'anonymous-bogus')", [id]),
+    ).rejects.toThrow();
+  });
+
   it('rejects a save whose seal was edited in the database', async () => {
     const user = await newUser('Seal');
     const created = await createGame({ userId: user, playerName: 'Seal', seed: 'pg-seal' });

@@ -7,17 +7,17 @@
  * creates and deletes through the API, and every one of those calls is authorised
  * server-side against the session cookie.
  */
-import { AuthGate } from '../../components/auth/auth-gate';
+import { GuestGate } from '../../components/auth/guest-gate';
 import { GameLibrary } from '../../components/games/game-library';
 import { useSession } from '../../lib/game-context';
 
 export default function GamesPage() {
   return (
-    <AuthGate>
+    <GuestGate>
       <main className="mx-auto w-full max-w-6xl px-4 py-8">
         <Games />
       </main>
-    </AuthGate>
+    </GuestGate>
   );
 }
 

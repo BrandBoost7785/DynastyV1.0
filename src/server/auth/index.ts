@@ -22,7 +22,8 @@ import type { StoreResult, UserRecord } from '../../persistence/types';
 
 export interface AuthUser {
   id: string;
-  email: string;
+  /** Null for a guest, which has no address. */
+  email: string | null;
   displayName: string;
   provider: UserRecord['authProvider'];
 }
@@ -81,7 +82,7 @@ async function resolveWithSupabase(request: Request): Promise<AuthResult | null>
   try {
     const { data, error } = await supabase.auth.getUser();
     if (error || !data.user) {
-      return { ok: false, code: 'not_authenticated', message: 'Your Supabase session is not valid. Sign in again.', status: 401, cookies };
+      return { ok: false, code: 'not_authenticated', message: 'Your session is not valid. Start a new guest session to keep playing.', status: 401, cookies };
     }
     const store = getStore();
     const profile = await store.findUserById(data.user.id);
@@ -91,7 +92,7 @@ async function resolveWithSupabase(request: Request): Promise<AuthResult | null>
         ok: true,
         user: {
           id: profile.value.id,
-          email: profile.value.email || email,
+          email: profile.value.email ?? (email || null),
           displayName: profile.value.displayName,
           provider: 'supabase',
         },
@@ -148,7 +149,7 @@ async function resolveWithLocalSession(request: Request): Promise<AuthResult> {
   }
   if (new Date(session.value.expiresAt).getTime() <= Date.now()) {
     await store.deleteSession(session.value.id);
-    return { ok: false, code: 'not_authenticated', message: 'Your session expired. Sign in again.', status: 401, cookies: [] };
+    return { ok: false, code: 'not_authenticated', message: 'Your session has ended. Start a new guest session to keep playing.', status: 401, cookies: [] };
   }
 
   const profile = await store.findUserById(session.value.userId);
@@ -166,16 +167,23 @@ async function resolveWithLocalSession(request: Request): Promise<AuthResult> {
 /**
  * Who is making this request?
  *
- * Supabase is preferred whenever it is configured; the local session cookie is the
- * development path. Both return the same shape so callers cannot tell them apart.
+ * Supabase is preferred whenever it is configured. When Supabase does not recognise the
+ * request, the local session cookie is still checked: a guest identity is issued by this
+ * server, not by Supabase, so it must resolve on a Supabase deployment too. The local path
+ * is no weaker for this: the cookie must be signed, and its session row must exist and not
+ * be expired or revoked. Cookies that Supabase asked the browser to set are carried over
+ * whichever way the request resolves.
  */
 export async function resolveUser(request: Request): Promise<AuthResult> {
   const env = getEnv();
-  if (env.supabase.configured) {
-    const result = await resolveWithSupabase(request);
-    if (result) return result;
-  }
-  return resolveWithLocalSession(request);
+  if (!env.supabase.configured) return resolveWithLocalSession(request);
+
+  const viaSupabase = await resolveWithSupabase(request);
+  if (viaSupabase?.ok) return viaSupabase;
+
+  const viaLocal = await resolveWithLocalSession(request);
+  if (viaLocal.ok) return { ...viaLocal, cookies: viaSupabase?.cookies ?? [] };
+  return viaSupabase ?? viaLocal;
 }
 
 /** True when the deployed build should be using Supabase Auth. */

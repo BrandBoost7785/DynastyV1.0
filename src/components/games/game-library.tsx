@@ -102,7 +102,9 @@ export function GameLibrary({ session }: { session: SessionInfo }) {
           <p className="text-[11px] font-semibold tracking-[0.18em] text-gold uppercase">Dynasty</p>
           <h1 className="text-2xl font-semibold text-ink">Your games</h1>
           <p className="mt-1 text-sm text-ink-dim">
-            Signed in as {session.user?.displayName ?? 'player'} ({session.auth} session).
+            {session.user?.provider === 'guest'
+              ? `Playing as ${session.user.displayName ?? 'a guest'}. This guest session lives in this browser only.`
+              : `Signed in as ${session.user?.displayName ?? 'player'} (${session.auth} session).`}
           </p>
         </div>
         <Link href="/leaderboard" className="hidden text-sm text-gold hover:underline sm:block">

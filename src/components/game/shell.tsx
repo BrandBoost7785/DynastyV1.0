@@ -333,25 +333,48 @@ function SessionFooter() {
   const { session, signOut } = useSession();
   const router = useRouter();
   const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const guest = session?.user?.provider === 'guest';
   return (
     <div className="mt-auto border-t border-line px-3 py-2">
-      <p className="truncate text-xs text-ink-dim">{session?.user?.displayName ?? 'Signed in'}</p>
-      <p className="truncate text-[11px] text-ink-faint">{session?.user?.email ?? ''}</p>
-      <div className="mt-2 flex items-center gap-2">
-        <Button
-          size="sm"
-          variant="ghost"
-          loading={busy}
-          onClick={async () => {
-            setBusy(true);
-            await signOut();
-            router.push('/login');
-          }}
-        >
-          <Icon.Logout size={14} />
-          Sign out
-        </Button>
-      </div>
+      <p className="truncate text-xs text-ink-dim">
+        {session?.user?.displayName ?? 'Player'}
+        {guest ? ' · guest' : ''}
+      </p>
+      {!guest && <p className="truncate text-[11px] text-ink-faint">{session?.user?.email ?? ''}</p>}
+      {!confirming ? (
+        <div className="mt-2 flex items-center gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setConfirming(true)}>
+            <Icon.Logout size={14} />
+            {guest ? 'End guest session' : 'Sign out'}
+          </Button>
+        </div>
+      ) : (
+        <div role="group" aria-label="Confirm ending the session" className="mt-2 space-y-2 rounded-md border border-down/40 bg-down-soft/40 p-2">
+          <p className="text-[11px] leading-snug text-ink">
+            {guest
+              ? 'Ending this guest session signs this browser out. Your saves stay on the server, but nothing can reopen them: a guest session cannot be recovered, here or on another device.'
+              : 'This signs this browser out of your account.'}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="danger"
+              loading={busy}
+              onClick={async () => {
+                setBusy(true);
+                await signOut();
+                router.push('/');
+              }}
+            >
+              {guest ? 'End and forget this guest' : 'Sign out'}
+            </Button>
+            <Button size="sm" variant="ghost" disabled={busy} onClick={() => setConfirming(false)}>
+              Keep playing
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
