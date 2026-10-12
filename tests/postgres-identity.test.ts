@@ -18,7 +18,7 @@ import { resetStoreInit, useStoreDriver } from '../src/persistence';
 import { extractMetadata } from '../src/persistence/serialize';
 import { createNewGame } from '../src/sim/bootstrap';
 import { advanceDay, rngForDay } from '../src/sim/tick';
-import { createGame, deleteGame, loadGame, listVersions } from '../src/server/services/game-service';
+import { advanceTime, createGame, deleteGame, loadGame, listVersions, restoreVersion } from '../src/server/services/game-service';
 import { resetRateLimits } from '../src/server/services/rate-limit';
 import type { SaveRecord } from '../src/persistence/types';
 import type { GameState } from '../src/sim/types';
@@ -218,17 +218,57 @@ describePg('game identity on PostgreSQL', () => {
   });
 
   /**
-   * Known defect, present at HEAD before this change: `loadGame` reads `state::text` from a
-   * jsonb column, and jsonb re-orders keys, so the seal check over the canonical JSON fails.
-   * This test is expected to FAIL until that defect is fixed. It is kept red on purpose.
+   * Regression: `loadGame` once read `state::text` from a jsonb column, and jsonb re-orders
+   * keys, so the seal check over the canonical JSON failed for every save. The stored text is
+   * now re-canonicalised before the seal is checked (see sealedTextFromStored).
    */
-  it('loads back a game it has just created (known pre-existing defect: jsonb key order vs. integrity seal)', async () => {
+  it('loads back a game it has just created', async () => {
     const user = await newUser('Round trip');
     const created = await createGame({ userId: user, playerName: 'Round', seed: 'pg-round-trip' });
     expect(created.ok).toBe(true);
     if (!created.ok) return;
     const loaded = await loadGame(user, created.value.state.gameId);
     expect(loaded.ok).toBe(true);
+    if (loaded.ok) expect(loaded.value.gameId).toBe(created.value.state.gameId);
+  });
+
+  it('saves, advances, restores an earlier version and loads it back', async () => {
+    const user = await newUser('History');
+    const created = await createGame({ userId: user, playerName: 'History', seed: 'pg-restore' });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const gameId = created.value.state.gameId;
+    const advanced = await advanceTime(user, gameId, 2, { expectedVersion: 0 });
+    expect(advanced.ok).toBe(true);
+
+    const restored = await restoreVersion(user, gameId, 0);
+    expect(restored.ok).toBe(true);
+    if (restored.ok) expect(restored.value.day).toBe(0);
+    const reloaded = await loadGame(user, gameId);
+    expect(reloaded.ok && reloaded.value.day).toBe(0);
+  });
+
+  it('rejects a save whose stored content was edited in the database', async () => {
+    const user = await newUser('Tamper');
+    const created = await createGame({ userId: user, playerName: 'Tamper', seed: 'pg-tamper' });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const gameId = created.value.state.gameId;
+    await admin.query(`update public.games set state = jsonb_set(state, '{world,day}', '999') where game_id = $1`, [gameId]);
+    const loaded = await loadGame(user, gameId);
+    expect(loaded.ok).toBe(false);
+    if (!loaded.ok) expect(loaded.code).toBe('state_corrupt');
+  });
+
+  it('rejects a save whose seal was edited in the database', async () => {
+    const user = await newUser('Seal');
+    const created = await createGame({ userId: user, playerName: 'Seal', seed: 'pg-seal' });
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    const gameId = created.value.state.gameId;
+    await admin.query(`update public.games set integrity_hash = '0000000000000000' where game_id = $1`, [gameId]);
+    const loaded = await loadGame(user, gameId);
+    expect(loaded.ok).toBe(false);
   });
 });
 

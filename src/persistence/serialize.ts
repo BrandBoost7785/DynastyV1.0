@@ -89,6 +89,27 @@ export function serializeState(state: GameState): StoreResult<SerializedState> {
   return ok({ json, integrityHash: digestHex(json), sizeBytes });
 }
 
+/**
+ * The text a seal was computed over, recovered from a document store that does not keep
+ * it byte for byte.
+ *
+ * `serializeState` seals `canonicalJson(state)`. PostgreSQL stores that document as `jsonb`,
+ * which does not keep key order, so the text it returns is not the sealed text, and checking
+ * the seal against it fails even for an unchanged save. Re-canonicalising the parsed document
+ * reproduces the sealed text exactly when the content is unchanged, and any change to the
+ * content still changes the digest. The check itself is not relaxed; only the byte form it is
+ * computed over is normalised. Text that is not JSON is reported as corrupt.
+ */
+export function sealedTextFromStored(stored: string): StoreResult<string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stored);
+  } catch (error) {
+    return err('corrupt', `Stored save is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return ok(canonicalJson(parsed));
+}
+
 export interface DeserializeOptions {
   /** Seal to verify against. Omit only when migrating an unsealed legacy row. */
   expectedHash?: string | null;

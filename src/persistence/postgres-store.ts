@@ -24,7 +24,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import pg from 'pg';
 import { getEnv } from '../config/env';
-import { CURRENT_SCHEMA_VERSION, MAX_SAVE_VERSIONS, deserializeState, extractMetadata, serializeState } from './serialize';
+import { CURRENT_SCHEMA_VERSION, MAX_SAVE_VERSIONS, deserializeState, extractMetadata, sealedTextFromStored, serializeState } from './serialize';
 import {
   err,
   ok,
@@ -362,7 +362,10 @@ export class PostgresStore implements GameStore {
       );
       if (!result.rowCount) return err('not_found', `No save "${gameId}" for this account.`);
       const row = result.rows[0] as Row;
-      const parsed = deserializeState(str(row.state_text), { expectedHash: str(row.integrity_hash) });
+      // jsonb does not keep the sealed byte order; recover the sealed text before checking it.
+      const sealedText = sealedTextFromStored(str(row.state_text));
+      if (!sealedText.ok) return sealedText;
+      const parsed = deserializeState(sealedText.value, { expectedHash: str(row.integrity_hash) });
       if (!parsed.ok) return parsed;
       return ok({ ...asMetadata(row), state: parsed.value });
     } catch (error) {
@@ -521,7 +524,9 @@ export class PostgresStore implements GameStore {
         version,
       ]);
       if (!row.rowCount) return err('not_found', `Version ${version} of "${gameId}" is not in history.`);
-      const parsed = deserializeState(str((row.rows[0] as Row).state_text), { expectedHash: str((row.rows[0] as Row).integrity_hash) });
+      const sealedText = sealedTextFromStored(str((row.rows[0] as Row).state_text));
+      if (!sealedText.ok) return sealedText;
+      const parsed = deserializeState(sealedText.value, { expectedHash: str((row.rows[0] as Row).integrity_hash) });
       if (!parsed.ok) return parsed;
       // Restoring writes forward: the restored state takes a new version number so
       // history is never rewritten and the compare-and-set still holds.
