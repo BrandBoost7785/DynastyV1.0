@@ -64,7 +64,12 @@ beforeEach(() => {
 
 describe('guest sessions with Supabase configured', () => {
   it('resolves a guest through the server session when Supabase knows no user', async () => {
-    const created = await invoke<{ userId: string }>(H(guestPost), '/api/auth/guest', { method: 'POST', body: {} });
+    // A browser page sends Origin on a POST; the guest route refuses one that sends neither.
+    const created = await invoke<{ userId: string }>(H(guestPost), '/api/auth/guest', {
+      method: 'POST',
+      body: {},
+      headers: { origin: 'http://localhost:3000' },
+    });
     expect(created.status).toBe(201);
     const cookie = sessionCookieOf(created.response);
 

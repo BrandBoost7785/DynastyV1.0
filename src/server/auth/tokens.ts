@@ -30,14 +30,18 @@ let bootSecret: string | null = null;
 /**
  * The signing secret.
  *
- * In production `DYNASTY_APP_SECRET` is mandatory (`assertProductionConfig` fails
- * the boot without it). In development, if it is missing, a random secret is
- * generated once per process: sessions still work, they just do not survive a
- * restart, which is the correct trade-off for refusing to ship a guessable key.
+ * In production `DYNASTY_APP_SECRET` is mandatory, and this function refuses to run without it.
+ * A per-process secret would make every instance reject the others' sessions and would
+ * silently log players out on every deploy, so the failure is loud instead. In development, if
+ * it is missing, a random secret is generated once per process: sessions still work, but they
+ * do not survive a restart.
  */
 export function signingSecret(): { secret: string; ephemeral: boolean } {
   const env = getEnv();
   if (env.appSecret) return { secret: env.appSecret, ephemeral: false };
+  if (env.isProduction) {
+    throw new Error('DYNASTY_APP_SECRET is required in production: refusing to sign sessions with a per-process secret.');
+  }
   if (!bootSecret) {
     bootSecret = randomBytes(32).toString('hex');
     console.warn('[auth] DYNASTY_APP_SECRET is not set — using an ephemeral dev secret. Sessions will not survive a restart.');

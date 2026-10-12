@@ -6,7 +6,8 @@
  * being re-implemented (and eventually diverging) in twenty route files.
  */
 import { resolveUser, type AuthUser, type CookieToSet } from './auth';
-import { clientKey, failJson, internalError, methodNotAllowed, newRequestId, okJson, readJson, requestIdOf } from './http';
+import { failJson, internalError, methodNotAllowed, newRequestId, okJson, readJson, requestIdOf } from './http';
+import { clientIdentity } from './client-identity';
 import { consume, rateLimitHeaders, READ_BUDGET, type RateLimitBudget } from './services/rate-limit';
 import { loadGame, type ServiceOutcome } from './services/game-service';
 import { validate, type ContractResult } from './contracts';
@@ -22,7 +23,7 @@ export interface HandlerContext {
 const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
- * Refuse a state-changing request that a foreign page sent.
+ * Refuse a state-changing request that a foreign page sent, or that does not say where it came from.
  *
  * The session cookie is SameSite=Lax, which already stops a cross-site form post from
  * carrying it. This is the second, explicit layer, and it runs before authentication and
@@ -32,10 +33,13 @@ const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
  *  - `Sec-Fetch-Site: same-origin` is accepted. The browser decided that from the URL it
  *    actually used, and a page cannot forge the header. This is what keeps a request
  *    working behind a proxy that rewrites the Host it arrives under.
- *  - Otherwise an `Origin` header must name the host the request was sent to. `null`
- *    (sandboxed or opaque origins) is refused.
- *  - No `Origin` at all is allowed: curl, server-to-server calls and the test harness send
- *    none, and the cookie rule above still applies to them.
+ *  - Otherwise an `Origin` header is required and must name the `Host` the request arrived
+ *    under. `null` (sandboxed or opaque origins) is refused. `X-Forwarded-Host` is never used:
+ *    the client writes it, so it could make a foreign origin look like this site.
+ *  - No `Origin` and no `Sec-Fetch-Site` is refused. Every current browser sends one of them
+ *    on a state-changing request. A caller that omits both is not a browser page, and a
+ *    cookie-bearing unsafe request must not depend on the caller being one. Non-browser
+ *    clients identify themselves by sending the `Origin` of the site they act for.
  *
  * Safe methods are never checked, so reads from any origin behave as before.
  */
@@ -49,7 +53,7 @@ export function crossOriginRefusal(request: Request): Response | null {
   if (fetchSite === 'same-origin') return null;
 
   const origin = request.headers.get('origin');
-  if (origin === null) return null;
+  if (origin === null) return refuse();
   if (origin === 'null') return refuse();
 
   let originHost: string;
@@ -58,8 +62,7 @@ export function crossOriginRefusal(request: Request): Response | null {
   } catch {
     return refuse();
   }
-  const forwarded = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
-  const expectedHost = (forwarded || request.headers.get('host') || new URL(request.url).host).toLowerCase();
+  const expectedHost = (request.headers.get('host') ?? new URL(request.url).host).toLowerCase();
   return originHost === expectedHost ? null : refuse();
 }
 
@@ -104,17 +107,42 @@ export async function withUser(
   }
 }
 
-/** Run a handler that does not require authentication (health, login, register). */
+/**
+ * Run a handler that does not require authentication (health, guest, login, register).
+ *
+ * `identity: 'required'` (default) is for endpoints that create or probe credentials. Their
+ * budget is per client, so a request whose client cannot be identified is refused rather than
+ * charged to a shared bucket. `identity: 'optional'` is for reads that cost nothing and must
+ * keep working for every caller, so they skip the per-client limit when no client is known.
+ */
 export async function withAnonymous(
   request: Request,
   handler: (ctx: { requestId: string }) => Promise<Response>,
-  options: { budget?: RateLimitBudget; scope?: string } = {},
+  options: { budget?: RateLimitBudget; scope?: string; identity?: 'required' | 'optional' } = {},
 ): Promise<Response> {
   const requestId = requestIdOf(request);
   const foreign = crossOriginRefusal(request);
   if (foreign) return foreign;
   try {
-    const limit = consume(`${clientKey(request)}:${options.scope ?? 'anonymous'}`, options.budget ?? READ_BUDGET);
+    const identity = clientIdentity(request);
+    if (!identity.ok) {
+      if (options.identity === 'optional') return handler({ requestId });
+      if (identity.reason === 'not_configured') {
+        return failJson(
+          'service_unavailable',
+          'This service is not configured to identify clients, so it cannot accept this request. Contact the operator.',
+          request,
+          { status: 503 },
+        );
+      }
+      return failJson(
+        'client_unidentified',
+        'This request could not be attributed to a client, so it was refused. Retry through the normal site.',
+        request,
+        { status: 403 },
+      );
+    }
+    const limit = consume(`${identity.key}:${options.scope ?? 'anonymous'}`, options.budget ?? READ_BUDGET);
     if (!limit.allowed) {
       return failJson('rate_limited', `Too many requests. Try again in ${Math.ceil(limit.retryAfterMs / 1000)}s.`, request, {
         status: 429,

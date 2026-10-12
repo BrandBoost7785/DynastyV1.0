@@ -36,6 +36,7 @@ cp .env.example .env.local
 Important variables:
 
 - `DYNASTY_APP_SECRET` — server-only session/audit signing secret; required in production.
+- `DYNASTY_TRUSTED_PROXY_HOPS` or `DYNASTY_CLIENT_IP_HEADER` — required in production; declares how the client address is obtained for rate limits. Declare exactly one. Forwarding headers are ignored until declared. See *Rate limits and client identity* below.
 - `DATABASE_URL` / `POSTGRES_URL` / `SUPABASE_DB_URL` — server-only PostgreSQL connection string; required for production persistence.
 - `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` — browser-visible Supabase project URL and publishable/anon key.
 - `SUPABASE_SERVICE_ROLE_KEY` — server-only; never expose this to browser code.
@@ -153,6 +154,19 @@ Still requiring external infrastructure:
 - The full gameplay UI/dashboard is not implemented; the shell page proves the client→API wiring and lists the endpoints. Phase 1B builds the interface on top of the API contract.
 - Authentication in production is Supabase Auth (configured by environment); the local scrypt + signed-cookie path is the development/test fallback and is not a substitute for it.
 - Rate limiting is per process (instance-local), intentionally without an external dependency. A horizontally scaled deployment multiplies the budget by the instance count.
+
+### Rate limits and client identity
+
+The guest and sign-in endpoints are limited per client address. Next.js route handlers receive no socket address, so the address comes from a forwarding header, and a client can write any header. The app therefore believes a header only when the deployment declares which proxy wrote it:
+
+| Deployment | Declare | Client address used |
+| --- | --- | --- |
+| Behind N proxies that append to `X-Forwarded-For` | `DYNASTY_TRUSTED_PROXY_HOPS=N` | The entry N places from the right. Entries to its left are client-controlled and ignored. |
+| Platform sets one header (e.g. Cloudflare) | `DYNASTY_CLIENT_IP_HEADER=cf-connecting-ip` | That header, which must hold exactly one address. |
+| Development / tests, nothing declared | nothing | One shared `local` bucket. Forwarding headers are not read. |
+| Production, nothing declared | nothing | Refused: `503 service_unavailable`, and a boot problem from `assertProductionConfig`. |
+
+A request whose address cannot be established (header absent, malformed, or with too few entries) is refused with `403 client_unidentified` on the guest and sign-in endpoints. It is never charged to a shared bucket. The session read and health check do not need an address and keep working. IPv6 is limited per `/64`, since one subscriber can rotate through a whole `/64`. Budgets are unchanged by this model.
 - A standalone "last day report" read model is not persisted: day reports are returned by the advance command for the days it ran. A persisted report history would be a simulation-state change and is deferred.
 - Phase 0 limitations that still hold:
 - Long catch-up simulation beyond 30 days per interactive request needs a future background-job design.

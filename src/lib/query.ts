@@ -41,7 +41,6 @@ export interface QuerySnapshot<T> {
 
 interface InternalEntry<T = unknown> extends QueryEntry<T> {
   promise: Promise<void> | null;
-  subscribers: Set<() => void>;
   /**
    * The snapshot this entry handed to React last.
    *
@@ -58,6 +57,22 @@ interface InternalEntry<T = unknown> extends QueryEntry<T> {
 const cache = new Map<string, InternalEntry>();
 let epoch = 0;
 const globalSubscribers = new Set<() => void>();
+/**
+ * Who is listening to each key. Kept apart from the cache entries on purpose: `clearAllQueries`
+ * discards the entries, and a listener attached to a discarded entry would never hear about the
+ * data that replaces it. A component that was mounted before a sign-in or a guest start would
+ * then sit on its loading state until the page was reloaded.
+ */
+const subscribersByKey = new Map<string, Set<() => void>>();
+
+function keySubscribers(key: string): Set<() => void> {
+  let set = subscribersByKey.get(key);
+  if (!set) {
+    set = new Set();
+    subscribersByKey.set(key, set);
+  }
+  return set;
+}
 
 /**
  * The snapshot for a key that has nothing cached.
@@ -102,7 +117,7 @@ export const DEFAULT_STALE_MS = 10_000;
 function entryFor<T>(key: string): InternalEntry<T> {
   let entry = cache.get(key) as InternalEntry<T> | undefined;
   if (!entry) {
-    entry = { data: undefined, error: null, updatedAt: 0, loading: false, promise: null, subscribers: new Set(), snapshot: null };
+    entry = { data: undefined, error: null, updatedAt: 0, loading: false, promise: null, snapshot: null };
     cache.set(key, entry as InternalEntry);
   }
   return entry;
@@ -110,9 +125,9 @@ function entryFor<T>(key: string): InternalEntry<T> {
 
 function publish(key: string): void {
   const entry = cache.get(key);
-  if (!entry) return;
-  entry.snapshot = null;
-  for (const notify of entry.subscribers) notify();
+  if (entry) entry.snapshot = null;
+  // Notify even when the entry is gone: a listener must re-read and see "nothing cached".
+  for (const notify of [...(subscribersByKey.get(key) ?? [])]) notify();
 }
 
 function publishAll(): void {
@@ -121,7 +136,7 @@ function publishAll(): void {
   for (const entry of cache.values()) entry.snapshot = null;
   emptySnapshots.clear();
   for (const notify of globalSubscribers) notify();
-  for (const entry of cache.values()) for (const notify of entry.subscribers) notify();
+  for (const set of subscribersByKey.values()) for (const notify of [...set]) notify();
 }
 
 /** Read whatever the cache currently holds. */
@@ -230,15 +245,17 @@ export function useQuery<T>(key: string | null, fetcher: () => Promise<T>, opts:
 
   const subscribe = useCallback(
     (onStoreChange: () => void) => {
-      if (!key) {
-        globalSubscribers.add(onStoreChange);
-        return () => globalSubscribers.delete(onStoreChange);
-      }
-      const entry = entryFor(key);
-      entry.subscribers.add(onStoreChange);
       globalSubscribers.add(onStoreChange);
+      if (!key) {
+        return () => {
+          globalSubscribers.delete(onStoreChange);
+        };
+      }
+      const listeners = keySubscribers(key);
+      listeners.add(onStoreChange);
       return () => {
-        entry.subscribers.delete(onStoreChange);
+        listeners.delete(onStoreChange);
+        if (listeners.size === 0 && subscribersByKey.get(key) === listeners) subscribersByKey.delete(key);
         globalSubscribers.delete(onStoreChange);
       };
     },

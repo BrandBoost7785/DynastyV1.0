@@ -100,6 +100,11 @@ async function invoke<T = unknown>(handler: RouteHandler, path: string, options:
   const headers = new Headers(options.headers ?? {});
   if (options.cookie) headers.set('cookie', options.cookie);
   if (options.body !== undefined) headers.set('content-type', 'application/json');
+  // A browser page sends Origin on every unsafe request. These tests are about game behaviour,
+  // so they send what a real page sends; the origin rule itself is tested in guest-mode and
+  // session-hardening, including the refusal of a request with no metadata at all.
+  const unsafe = ['POST', 'PUT', 'PATCH', 'DELETE'].includes((options.method ?? 'GET').toUpperCase());
+  if (unsafe && !headers.has('origin') && !headers.has('sec-fetch-site')) headers.set('origin', 'http://localhost:3000');
   const request = new Request(`http://localhost:3000${path}`, {
     method: options.method ?? 'GET',
     headers,

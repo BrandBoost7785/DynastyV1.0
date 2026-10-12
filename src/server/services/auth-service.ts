@@ -176,6 +176,8 @@ export interface GuestOutcome {
   userId?: string;
   displayName?: string;
   message?: string;
+  /** `conflict` when a non-guest account is signed in and must sign out first. */
+  code?: 'conflict';
   setCookies: string[];
 }
 
@@ -189,6 +191,10 @@ export interface GuestOutcome {
  *
  * The guest has no email and no password. Its credential is the signed session cookie, which
  * is only ever delivered in Set-Cookie, never in the body.
+ *
+ * A valid session for a real account is never replaced. Starting a guest would overwrite the
+ * account's cookie in this browser, and the player would be signed out of the account without
+ * having chosen to. That refusal is `conflict`; the player signs out first.
  */
 export async function startGuest(request: Request): Promise<GuestOutcome> {
   const existing = await resolveUser(request);
@@ -200,6 +206,15 @@ export async function startGuest(request: Request): Promise<GuestOutcome> {
       displayName: existing.user.displayName,
       message: 'Resumed your guest session.',
       setCookies: existing.cookies.map((c) => serializeCookie(c.name, c.value, c.options ?? {})),
+    };
+  }
+  if (existing.ok) {
+    return {
+      ok: false,
+      created: false,
+      code: 'conflict',
+      message: 'You are signed in to an account. Sign out before starting a guest session.',
+      setCookies: [],
     };
   }
 

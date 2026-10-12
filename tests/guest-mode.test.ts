@@ -14,7 +14,7 @@
  *   8. the guest entry point is rate limited per client;
  *   9. a legacy SQLite database (email NOT NULL) is rebuilt in place without losing rows.
  */
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createHmac } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -24,6 +24,7 @@ import { SqliteStore } from '../src/persistence/sqlite-store';
 import { resetStoreInit, useStoreDriver } from '../src/persistence';
 import { GUEST_BUDGET, resetRateLimits } from '../src/server/services/rate-limit';
 import { issueSessionToken } from '../src/server/auth/tokens';
+import { resetEnvCache } from '../src/config/env';
 import type { GameStateDto } from '../src/server/dto';
 import type { SaveMetadata } from '../src/persistence/types';
 
@@ -71,6 +72,8 @@ interface CallOptions {
   params?: Record<string, string>;
   headers?: Record<string, string>;
   host?: string;
+  /** Send an unsafe request with no browser metadata at all (no Origin, no Sec-Fetch-Site). */
+  bare?: boolean;
 }
 
 type RouteHandler = (request: Request, context: { params: Promise<Record<string, string>> }) => Promise<Response>;
@@ -79,6 +82,12 @@ async function invoke<T = unknown>(handler: RouteHandler, path: string, options:
   const headers = new Headers(options.headers ?? {});
   if (options.cookie) headers.set('cookie', options.cookie);
   if (options.body !== undefined) headers.set('content-type', 'application/json');
+  // A browser sends Origin on every unsafe request, so the harness does too, for the host it
+  // is calling. Tests that exercise the missing-metadata rule set `bare` to opt out.
+  const unsafe = ['POST', 'PUT', 'PATCH', 'DELETE'].includes((options.method ?? 'GET').toUpperCase());
+  if (unsafe && !options.bare && !headers.has('origin') && !headers.has('sec-fetch-site')) {
+    headers.set('origin', `http://${options.host ?? 'localhost:3000'}`);
+  }
   const request = new Request(`http://${options.host ?? 'localhost:3000'}${path}`, {
     method: options.method ?? 'GET',
     headers,
@@ -364,8 +373,8 @@ describe('origin checks on unsafe requests', () => {
     expect(accepted.status).toBe(201);
   });
 
-  it('accepts a request with no Origin header, as non-browser clients send', async () => {
-    const accepted = await invoke(H(guestPost), '/api/auth/guest', { method: 'POST', body: {} });
+  it('accepts a non-browser client that names the site it is acting for in Origin', async () => {
+    const accepted = await invoke(H(guestPost), '/api/auth/guest', { method: 'POST', body: {}, headers: { origin: 'http://localhost:3000' }, bare: true });
     expect(accepted.status).toBe(201);
   });
 
@@ -427,11 +436,32 @@ describe('origin checks on unsafe requests', () => {
 /* ------------------------------------------------------------------ */
 
 describe('rate limits on guest creation', () => {
+  // The client address is only believed when the deployment declares the proxy that wrote it.
+  // These tests declare one trusted proxy, as production does, and then prove that the
+  // client cannot choose its own bucket.
+  const SAVED_HOPS = process.env.DYNASTY_TRUSTED_PROXY_HOPS;
+  beforeEach(() => {
+    process.env.DYNASTY_TRUSTED_PROXY_HOPS = '1';
+    resetEnvCache();
+  });
+  afterEach(() => {
+    if (SAVED_HOPS === undefined) delete process.env.DYNASTY_TRUSTED_PROXY_HOPS;
+    else process.env.DYNASTY_TRUSTED_PROXY_HOPS = SAVED_HOPS;
+    resetEnvCache();
+  });
+
+  const start = (xff: string | null, extra: Record<string, string> = {}) =>
+    invoke(H(guestPost), '/api/auth/guest', {
+      method: 'POST',
+      body: {},
+      headers: { origin: 'http://localhost:3000', ...extra, ...(xff === null ? {} : { 'x-forwarded-for': xff }) },
+    });
+
   it('limits how many guests one client can start within the window', async () => {
     let last = 0;
     let retryAfter: string | null = null;
     for (let i = 0; i < GUEST_BUDGET.limit + 1; i++) {
-      const out = await invoke(H(guestPost), '/api/auth/guest', { method: 'POST', body: {}, headers: { 'x-forwarded-for': '203.0.113.7' } });
+      const out = await start('203.0.113.7');
       last = out.status;
       if (out.status === 429) retryAfter = out.response.headers.get('retry-after');
     }
@@ -439,9 +469,79 @@ describe('rate limits on guest creation', () => {
     expect(retryAfter).not.toBeNull();
   });
 
+  it('a client cannot evade the limit by changing the forwarding header it sends', async () => {
+    let last = 0;
+    for (let i = 0; i < GUEST_BUDGET.limit + 1; i++) {
+      // Each attempt invents a new leftmost address. The proxy appends the real one.
+      const out = await start(`198.18.${i}.${i + 1}, 203.0.113.7`);
+      last = out.status;
+    }
+    expect(last).toBe(429);
+  });
+
+  it('a spoofed entry naming another client cannot spend that client\'s budget', async () => {
+    resetRateLimits();
+    // The attacker (real address 203.0.113.50) names the victim (203.0.113.7) as the leftmost entry.
+    for (let i = 0; i < GUEST_BUDGET.limit + 1; i++) await start('203.0.113.7, 203.0.113.50');
+    // The victim, arriving from their own address, still has a full budget.
+    const victim = await start('203.0.113.7');
+    expect(victim.status).toBe(201);
+  });
+
   it('does not let one client exhaust the budget for another', async () => {
-    const other = await invoke(H(guestPost), '/api/auth/guest', { method: 'POST', body: {}, headers: { 'x-forwarded-for': '198.51.100.9' } });
+    resetRateLimits();
+    for (let i = 0; i < GUEST_BUDGET.limit + 1; i++) await start('203.0.113.7');
+    const other = await start('198.51.100.9');
     expect(other.status).toBe(201);
+  });
+
+  it('refuses a guest request that has no client address, rather than sharing a bucket', async () => {
+    resetRateLimits();
+    for (let i = 0; i < 3; i++) {
+      const out = await start(null);
+      expect(out.status).toBe(403);
+      expect(out.body.error?.code).toBe('client_unidentified');
+      expect(out.response.headers.getSetCookie()).toEqual([]);
+    }
+  });
+
+  it('refuses a malformed forwarding entry instead of guessing', async () => {
+    for (const bad of ['not-an-address', '203.0.113.7:4000', '']) {
+      const out = await start(bad);
+      expect(out.status, JSON.stringify(bad)).toBe(403);
+      expect(out.body.error?.code).toBe('client_unidentified');
+    }
+  });
+
+  it('keeps the session read available to a caller with no client address', async () => {
+    const read = await invoke(H(sessionGet), '/api/auth/session', { headers: {} });
+    expect(read.status).toBe(200);
+  });
+});
+
+describe('origin rules for guest creation without a browser', () => {
+  it('refuses an unsafe request that states neither an origin nor fetch metadata', async () => {
+    const before = await invoke(H(guestPost), '/api/auth/guest', { method: 'POST', body: {}, headers: { origin: 'http://localhost:3000' } });
+    expect(before.status).toBe(201);
+    const refused = await invoke(H(guestPost), '/api/auth/guest', { method: 'POST', body: {}, bare: true });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error?.code).toBe('forbidden_origin');
+    expect(refused.response.headers.getSetCookie()).toEqual([]);
+  });
+
+  it('refuses a same-site request with no origin', async () => {
+    const refused = await invoke(H(guestPost), '/api/auth/guest', { method: 'POST', body: {}, headers: { 'sec-fetch-site': 'same-site' }, bare: true });
+    expect(refused.status).toBe(403);
+  });
+
+  it('does not trust x-forwarded-host: a forged forwarding host cannot make a foreign origin match', async () => {
+    const refused = await invoke(H(guestPost), '/api/auth/guest', {
+      method: 'POST',
+      body: {},
+      headers: { origin: 'https://evil.example', 'x-forwarded-host': 'evil.example' },
+    });
+    expect(refused.status).toBe(403);
+    expect(refused.body.error?.code).toBe('forbidden_origin');
   });
 });
 

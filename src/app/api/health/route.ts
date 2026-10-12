@@ -58,6 +58,6 @@ export async function GET(request: Request): Promise<Response> {
         request,
       );
     },
-    { scope: 'health' },
+    { scope: 'health', identity: 'optional' },
   );
 }

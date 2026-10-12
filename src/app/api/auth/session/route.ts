@@ -44,6 +44,6 @@ export async function GET(request: Request): Promise<Response> {
         cookies,
       );
     },
-    { scope: 'auth.session' },
+    { scope: 'auth.session', identity: 'optional' },
   );
 }

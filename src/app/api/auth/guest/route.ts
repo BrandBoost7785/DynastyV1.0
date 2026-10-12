@@ -25,6 +25,9 @@ export async function POST(request: Request): Promise<Response> {
       if (skipped) return skipped;
 
       const result = await startGuest(request);
+      if (result.code === 'conflict') {
+        return withSetCookies(failJson('conflict', result.message ?? 'Sign out before starting a guest session.', request, { status: 409 }), result.setCookies);
+      }
       if (!result.ok || !result.userId) {
         return withSetCookies(failJson('service_unavailable', result.message ?? 'The guest session could not be started.', request, { status: 503 }), result.setCookies);
       }

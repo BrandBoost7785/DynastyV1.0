@@ -47,6 +47,9 @@ function makeClient() {
     const headers = {};
     if (cookie) headers.cookie = cookie;
     if (body !== undefined) headers['content-type'] = 'application/json';
+    // The server refuses an unsafe request that names no origin. This client acts for the site
+    // it is testing, so it says so the way a same-site page would.
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) headers.origin = new URL(BASE).origin;
     for (const [key, value] of Object.entries(opts.headers ?? {})) headers[key] = value;
     const response = await fetch(BASE + path, {
       method,

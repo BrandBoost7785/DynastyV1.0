@@ -33,6 +33,40 @@ export interface EnvConfig {
   sqlitePath: string;
   /** Base URL of the app, used for absolute links in notifications. */
   appUrl: string;
+  /**
+   * How a client address is obtained for rate limiting. Exactly one declaration is allowed.
+   * `problem` is set when the declaration is missing or malformed in a way that cannot be
+   * trusted; see client-identity.ts for the model.
+   */
+  clientIp: {
+    header: string | null;
+    trustedProxyHops: number | null;
+    problem: string | null;
+  };
+}
+
+const HEADER_NAME = /^[a-z0-9-]{1,64}$/;
+
+function parseClientIp(): EnvConfig['clientIp'] {
+  const header = nonEmpty(process.env.DYNASTY_CLIENT_IP_HEADER)?.toLowerCase() ?? null;
+  const hopsRaw = nonEmpty(process.env.DYNASTY_TRUSTED_PROXY_HOPS);
+  if (header !== null && hopsRaw !== null) {
+    return { header: null, trustedProxyHops: null, problem: 'Set only one of DYNASTY_CLIENT_IP_HEADER or DYNASTY_TRUSTED_PROXY_HOPS, not both' };
+  }
+  if (header !== null) {
+    if (!HEADER_NAME.test(header)) {
+      return { header: null, trustedProxyHops: null, problem: 'DYNASTY_CLIENT_IP_HEADER must be a plain header name such as cf-connecting-ip' };
+    }
+    return { header, trustedProxyHops: null, problem: null };
+  }
+  if (hopsRaw !== null) {
+    const hops = /^\d+$/.test(hopsRaw) ? Number(hopsRaw) : NaN;
+    if (!Number.isInteger(hops) || hops < 1 || hops > 10) {
+      return { header: null, trustedProxyHops: null, problem: 'DYNASTY_TRUSTED_PROXY_HOPS must be an integer from 1 to 10' };
+    }
+    return { header: null, trustedProxyHops: hops, problem: null };
+  }
+  return { header: null, trustedProxyHops: null, problem: null };
 }
 
 function nonEmpty(v: string | undefined | null): string | null {
@@ -94,6 +128,7 @@ export function getEnv(): EnvConfig {
     appSecret: nonEmpty(process.env.DYNASTY_APP_SECRET),
     sqlitePath: nonEmpty(process.env.DYNASTY_SQLITE_PATH) ?? '.data/dynasty-dev.sqlite',
     appUrl: nonEmpty(process.env.NEXT_PUBLIC_APP_URL) ?? 'http://localhost:3000',
+    clientIp: parseClientIp(),
   };
   return cached;
 }
@@ -113,6 +148,13 @@ export function assertProductionConfig(): string[] {
   const problems: string[] = [];
   if (!env.databaseUrl) problems.push('DATABASE_URL is required in production');
   if (!env.appSecret) problems.push('DYNASTY_APP_SECRET is required in production');
+  if (env.clientIp.problem) {
+    problems.push(env.clientIp.problem);
+  } else if (env.clientIp.header === null && env.clientIp.trustedProxyHops === null) {
+    problems.push(
+      'DYNASTY_TRUSTED_PROXY_HOPS or DYNASTY_CLIENT_IP_HEADER must be set in production, so guest and sign-in limits are charged to a real client',
+    );
+  }
   if (env.dbDriver === 'sqlite') {
     problems.push('The SQLite adapter is dev/test only and cannot be used in production');
   }

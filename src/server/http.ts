@@ -17,7 +17,7 @@ import { randomUUID } from 'node:crypto';
 import type { GameErrorCode } from '../sim/types';
 import { sanitiseForClient } from './dto';
 
-export type ApiErrorCode = GameErrorCode | 'payload_too_large' | 'unsupported_method' | 'service_unavailable' | 'forbidden_origin';
+export type ApiErrorCode = GameErrorCode | 'payload_too_large' | 'unsupported_method' | 'service_unavailable' | 'forbidden_origin' | 'client_unidentified';
 
 export interface ApiError {
   code: ApiErrorCode;
@@ -46,6 +46,7 @@ export const STATUS_FOR_CODE: Partial<Record<ApiErrorCode, number>> = {
   not_authenticated: 401,
   action_not_permitted: 403,
   forbidden_origin: 403,
+  client_unidentified: 403,
   illegal_in_jurisdiction: 403,
   locked: 403,
   unlocked_required: 403,
@@ -160,11 +161,4 @@ export async function readJson(request: Request, maxBytes = 256 * 1024): Promise
   } catch {
     return { ok: false, response: failJson('invalid_input', 'Request body is not valid JSON.', request) };
   }
-}
-
-/** Best-effort client identity for rate limiting unauthenticated endpoints. */
-export function clientKey(request: Request): string {
-  const forwarded = request.headers.get('x-forwarded-for');
-  if (forwarded) return forwarded.split(',')[0]!.trim();
-  return request.headers.get('x-real-ip') ?? 'unknown';
 }
